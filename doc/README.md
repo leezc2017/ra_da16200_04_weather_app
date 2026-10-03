@@ -110,6 +110,7 @@ PC 串口助手 ──USB──> RA4M2 (SCI9) ──板内UART──> DA16200 (S
 | `[AT>]` | AT 引擎发出的命令（AUTO/AUTOB 诊断期间） |
 | `[PROBE]` | 自动诊断的步骤横幅与结果汇总 |
 | `[URC]` | URC 时间戳追踪（AUTOB 被动监听期间，每条 URC 一行） |
+| `[wx]` | 天气状态机（`weather_task.c`）的决策日志，如 `ip from URC:` / `TZONE OK` / `fetch <url>` |
 | `[USB]` | USB 侧提示（如诊断期间输入被屏蔽） |
 | `[ERR]` | 串口写失败等错误 |
 
@@ -136,6 +137,29 @@ RA E2STUDIO 4.weather_app
 USB input -> WIFI uart (auto CRLF), WIFI response back to USB
 Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop
 ```
+
+随后 `at_engine_init()` → `oled_port_init()` → `weather_task_init()`。
+
+`weather_task_init()` **上电先发一条裸 `AT` 做模块自检**（2026-10-03 用户要求：
+「每次开机先用 AT 命令测试模块，再走后续」），再进入天气状态机：
+
+```
+[wx] task init
+[AT>] AT                          <- CMD_AT 自检, 2000ms 超时
+[wx] AT self-test sent
+[WIFI] OK
+[wx] AT self-test: OK, module is alive
+[WIFI] +WFJAP:1,'CMCC-xxxx',192.168.1.2      <- 自检在途时 URC 照样收, 不丢
+[wx] +WFJAP:1 -> CONNECTED, urc='+WFJAP:1,...'
+[wx] ip from URC: 192.168.1.2     <- IP 直接从 URC 解析, 不发 AT+NWIP=?
+```
+
+要点：
+
+- 自检**失败不致命**，只打印 `TIMEOUT`/`ERROR` 后继续等 `+WFJAP`（模块冷启动可能慢）。
+- 自检只验「模块活着」，验不了「连上 AP 了」，因此仍保留 35s `AT+WFCAP` 兜底。
+- IP 从 `+WFJAP:1` URC 行取（`+WFJAP:1,'SSID',IP` → 最后一个逗号后），
+  **不要发 `AT+NWIP=?`**：该查询会因长响应丢字节而超时（DESIGN 风险#5）。
 
 ## 4. 使用方法
 

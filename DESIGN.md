@@ -82,14 +82,34 @@ at_result_t at_engine_poll(void);       /* 每 tick 调用，非阻塞 */
 - **超时**：命令级超时（联网 30s、NWHTC 25s、HTTP 普通 2.5s）。
 - **并发约束**：裸机单飞行——同一时刻只允许一条命令在途；按键/渲染在主循环继续跑。
   NWHTC 尤其**不可并发**（实测三条并发会把后两条的正文冲掉）。
+- **命令所有权 `cmd_owner_t`（2026-10-03 修复的真实 bug，必读）**：
+  引擎有多个使用方（`weather_task` 自己的时区/SNTP/时间命令，以及 `weather_http` 的
+  NWHTC），裸机单飞行意味着**谁发命令谁负责在完成时收结果**。因此每个在途命令必须
+  记录归属，由 `weather_task_poll()` 第 3 步统一分发：
+
+  ```c
+  at_result_t r = at_engine_poll();
+  if (AT_RES_PENDING != r)
+  {
+      if (CMD_HTTP == s.cmd)  { weather_http_on_engine_done(r); ... }  /* HTTP */
+      else if (CMD_NONE != s.cmd) { on_cmd_done(r); }                   /* 自己的 */
+  }
+  ```
+
+  ⚠ **不能用 `weather_http_busy()` 当分发依据**。踩过的坑：`weather_http` 的 busy 状态
+  若因上一次失败/超时被提前清掉，引擎本次 `OK` 就会落到"无人认领"分支被静默丢弃 →
+  `fetch_weather_done()` 永不执行 → OLED 一直显示"waiting data.."，但串口能看到完整的
+  HTTP 响应。归属必须由 `s.cmd` 显式记录：`fetch_weather_start()` 成功后置 `CMD_HTTP`，
+  完成后清回 `CMD_NONE`。
 
 ## 5. 天气链路（对应 GD32 实现）
 
 | 步骤 | GD32 做法 | RA 做法 |
 |---|---|---|
 | 联网 | `wifi_prov_start()` 阻塞重试3次 | **实测简化（2026-10-03 AUTOB）**：NVRAM 有 profile 时**上电自发** `+WFJAP:1`，实测 `+INIT:DONE` 后 **3.5s** 拿到 IP（`AT+GETFASTCONN:0` 表明与 fast connect 无关）。故主循环只需**被动等 URC**，无需 `AT+WFMODE=0`/`AT+RESTART`/`WFJAPA`。⚠ 但 `AT+WFCAP` 在无 profile 时回 `ERROR:-7`，所以首次仍需 `WFJAPA` 存 profile（阶段4 配网负责） |
+| 取 IP | `wifi_get_ip()` | **从 `+WFJAP:1` URC 行直接解析**（`+WFJAP:1,'CMCC-xxxx',192.168.1.2` → 取最后一个逗号后的 IP）。⚠ **不要发 `AT+NWIP=?`**：该查询实测会因长响应丢字节而超时（与风险#5 同根因），且 URC 里本来就有 IP，属于多此一举 |
 | 对时 | lwip SNTP 钩子 | **不使用 RA 内部 RTC**（用户已确认）。实测：`AT+TZONE=28800`（**单位确为秒**）+ `AT+NWSNTP=1,ntp.aliyun.com,86400` → `AT+TIME` 回 `+TIME:2026-10-03,11:30:51`（真实本地时间）。主页时钟每分钟查一次 `AT+TIME` |
-| 拉天气 | 裸 socket GET，4KB 收包缓冲 | `AT+NWHTC=<seniverse now.json>,get` **PAYLOAD 模式**。⚠ **裸 URL 即可，不要单引号**（实测裸/引号结果完全一致：`len=690 body_len=274`）；⚠ URL 含 `&`/`?` 不需转义（URI 是第一个逗号前的单参数） |
+| 拉天气 | 裸 socket GET，4KB 收包缓冲 | `AT+NWHTC=<seniverse now.json>,get` **PAYLOAD 模式**。✅ **裸 URL 即可，不要单引号**（风险#3 已清零：裸/引号结果完全一致 `len=690 body_len=274`）；✅ URL 含 `&`/`?` **不需转义**（URI 是第一个逗号前的单参数）；⚠ 串长必须 < `AT_CMD_MAX`(180) |
 | 解析 | cJSON：`results[0].now.text/code/temperature` + `last_update` | **原样移植** `weather_parse.c`。实测 `hdr_sep=1`（**含 HTTP 响应头**）→ 必须先切 `\r\n\r\n`；切完 `json_direct=1`（正文首字符 `{`）→ 可直喂 cJSON |
 | 刷新 | 15min：主循环按分钟计数 | 相同，挂在主状态机 tick 上（桥工程已有 10ms 节拍，累计秒/分） |
 | 按键 | short=刷新 / double=翻页 / long=配网 | 移植 `key_scan.c` 三态逻辑（20ms 轮询 + 去抖） |
@@ -196,6 +216,23 @@ OLED_Set_Pos(x, y):  0xb0 + y     // y 是【页号 0~3】，不是像素纵坐�
 | `src/key_scan.c/.h` | 移植 GD32 三态逻辑（short/double/long），GPIO 换 `R_IOPORT_PinRead` |
 | `src/cJSON.c/.h` | MIT 许可，从 GD32 SDK 拷贝（`MSDK/util/`） |
 
+**上电自检序列（2026-10-03 新增，用户要求「每次开机先用 AT 命令测试模块，再走后续」）**
+
+上电后不再"什么都不发、纯等自发 URC"，而是**先用一条裸 `AT` 确认模块活着**：
+
+```
+上电 ──> at_send_owned("AT", 2000ms, CMD_AT)   # 自检
+      ──> [wx] AT self-test: OK, module is alive
+      ──> 被动等 +WFJAP:1 URC  ──> 取 IP / TZONE / SNTP / 首次拉天气
+```
+
+| 设计点 | 原因 |
+|---|---|
+| 自检归属 `CMD_AT` | 引擎只有一个轮询点，结果必须经 `on_cmd_done()` 回来（§4 命令所有权） |
+| 自检失败**不致命** | 只打印 `TIMEOUT`/`ERROR` 后继续等 `+WFJAP`，避免模块冷启动慢就被判死 |
+| 自检与 URC 监听**并行不冲突** | 引擎非 IDLE 期间照样收 URC（`urc_push` 不看状态），所以自检在途时 `+WFJAP` 不会丢 |
+| 仍保留 35s `AT+WFCAP` 兜底 | 自检只验"模块活着"，验不了"连上 AP 了" |
+
 **⚠ 与 GD32 版的三个关键差异（踩过坑）**
 
 1. **时间不能本地算** —— GD32 有 `s_epoch_base` + `gmtime()`，RA 没有 RTC，
@@ -275,8 +312,8 @@ GD32 版在连接失败等状态下长按切配网有概率不生效，源码分
 |---|---|---|
 | 1 | **`AT+NWHTC` 响应回传格式**：payload 前是否有 HTTP 头、以什么标志结束（决定采集状态机） | **✅ 已清零（2026-10-03 实测，与原假设不同）**。`HELP` 自报 `AT+NWHTC=<uri>,<option>(,<msg>)`，option ∈ get\|post\|put。真实时序：① 发命令 → **立刻回一个裸 `OK`（仅 6 字节同步回执）** → ② **异步流式推送完整 HTTP 响应，含响应头**（实测有 `Set-Cookie`/`Vary`/`Connection: close`）→ ③ 正文 → ④ 末尾 `+NWHTCSTATUS:<n>`（`0`=成功）才是**真正结束标志**。<br>结论：① 结束标志**不是 `OK`**（把 `OK` 当结束只拿到 6 字节）；② **必须先切 `\r\n\r\n`** 再交 cJSON；③ 缓冲要够 —— 百度首页实测 **667KB / 推 60s**，4KB 只够心知这类小 JSON；④ **同一时刻只能一条 NWHTC 在途**。已实现为 `at_engine` 的 `AT_MODE_PAYLOAD` |
 | 2 | **读取 DA16200 当前时间的 AT 命令** | **✅ 已清零**。读：`AT+TIME` → `+TIME:<date>,<time>`；写：`AT+TIME=<date>,<time>`。时区 `AT+TZONE` 单位**确认为秒**（`AT+TZONE=?` → `+TZONE:28800`），`AT+TZONE=28800` 生效。SNTP `AT+NWSNTP=<sntp>(,<server_ip>,<period>)` → `AT+NWSNTP=1,ntp.aliyun.com,86400` 后 `+TIME:2026-10-03,11:30:51` 为**真实本地时间(UTC+8)**。`AT+DATE` **不存在**（`ERROR:-1`）。DESIGN §5 假设全部成立 |
-| 3 | AT 命令中 URL 特殊字符（`&` `?` `,`）是否需要单引号包裹 | **待重测**（上一轮作废：三条 NWHTC 在百度 667KB payload 推送期间并发发出，HTTP2/3 正文根本没出现）。从 `HELP` 语法看 URI 是**第一个逗号前的单参数**，`&`/`?` 非分隔符，裸 URL 大概率可行；单引号用于**值内含逗号**。`AUTO` 已改为心知 URL 单发重测 |
-| 4 | DA16200 开机自动回连行为（NVRAM 有 profile 时） | **待测**：`AUTOB`。线索：命令表里有 **`AT+DEFAP`**（默认 AP）与 **`AT+GETFASTCONN`/`AT+SETFASTCONN`**（fast connect），很可能就是自动重连机制，`AUTOB` 已加入这两组查询。另实测 `AT+WFCAP` → `ERROR:-7`（无结果），证明测试前 NVRAM **确实没有** profile，`WFJAPA` 连上之后才有 |
+| 3 | AT 命令中 URL 特殊字符（`&` `?` `,`）是否需要单引号包裹 | **✅ 已清零（2026-10-03 心知 now.json 实测）**：裸 URL 直接可用，`&`/`?` 不转义、单引号可加可不加，三种写法结果一致（`len=690 body_len=274`）。从 `HELP` 语法看 URI 是**第一个逗号前的单参数**，单引号仅用于**值内含逗号**的场景 |
+| 4 | DA16200 开机自动回连行为（NVRAM 有 profile 时） | **✅ 已清零（2026-10-03 AUTOB + 天气任务实测）**：存过 profile 后**上电自发** `+WFJAP:1`，**不需要**发任何连接命令，`+INIT:DONE` 后约 **3.5s** 拿到 IP；`AT+GETFASTCONN:0` 表明与 fast connect 机制无关。⚠ 连带结论：**IP 也直接从这条 URC 里取**，省掉 `AT+NWIP=?`（该查询会因长响应丢字节超时，见风险#5）。无 profile 时 `AT+WFCAP` 回 `ERROR:-7`，需 `WFJAPA` 存 profile（阶段4 配网负责） |
 | 5 | 长响应完整性 | **✅ 已清零（是丢字节，非截断）**：根因 = `__io_putchar` 逐字节忙等 TX 完成 + WIFI RX 环仅 512B，115200 下零余量溢出静默丢。修法 = USB TX 环 4KB 非阻塞 `usb_tx_pump()`（三指针，区分"已入队"与"硬件已发完"）+ WIFI RX 环 8KB。**已验证通过**：`AT+WFSCAN` 15 条 AP 全部 BSSID 完整 6 段、字段结构一致、零缺段零粘行（修复前 20 条里有 10 处硬伤），`wifi_rx_drop=0`、`usb_tx_drop=0` |
 
 阶段4配网调研（阶段4开工前清零）：
@@ -293,6 +330,7 @@ GD32 版在连接失败等状态下长按切配网有概率不生效，源码分
 |---|---|---|
 | 6 | ~~OLED 接线~~ 已确认与 `RA4M2OLED` 示例一致；剩余：机械按键 P005/P006 的极性/上拉方式 | 实现时看原理图或实测 |
 | 7 | 心知天气免费版限频 ~20 次/时 | 沿用 15 分钟刷新即可 |
+| 11 | **DA16200 偶发「要插拔几次才正常」**（2026-10-03 用户观察：开机偶尔拿不到串口输出，需重新插拔模块） | **待查，暂判非软件**。理由：本工程上电后**不主动发任何连接命令**，只是被动等 `+WFJAP` URC（§5），软件时序无从"催坏"模块。已加**开机 `AT` 自检**作为区分手段：若自检就 `TIMEOUT` → 模块侧/接线/供电问题；自检 `OK` 但后续命令超时 → 才回头查软件。当前 `configuration.xml` 中 IWDT/WDT 的 start mode 均为 `disabled`/`register`，**未被使能**，故排除看门狗复位 |
 
 ## 10. 决策记录（全部已确认）
 
@@ -302,6 +340,9 @@ GD32 版在连接失败等状态下长按切配网有概率不生效，源码分
 | 配网 | **必须 SoftAP 网页配网**，方案见 §8 |
 | 实施顺序 | 先串口输出验证（阶段2）、后 OLED（阶段3） |
 | 工程位置 | `.` |
+| IP 获取方式 | **从 `+WFJAP:1` URC 解析，不发 `AT+NWIP=?`**（2026-10-03，因长响应丢字节超时，见风险#5） |
+| 上电流程 | **先 `AT` 自检，再被动等 `+WFJAP`**，然后 TZONE → SNTP → 拉天气（2026-10-03 用户要求） |
+| 天气服务 | **心知天气 `now.json`**，不用百度（百度首页 667KB / 推 60s，会淹没后续命令） |
 | 其他 | OLED 接线=`RA4M2OLED` 示例；不用 RA 内部 RTC；显示对齐 GD32 版 |
 
 ## 11. 可直接复用的资产
