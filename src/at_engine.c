@@ -48,6 +48,17 @@ static struct {
     uint16_t    line_len;
     bool        line_overflow;
 
+    /* 行组装诊断(2026-10-03): 零开销计数器, 只在命令收口时汇总打印。
+     * 用途: 区分"模块没发终止行"与"发了但行组装/匹配把它丢了"。
+     *   dbg_lines  = 收到并完成组装的行数   (为 0 说明一个 \r\n 都没见)
+     *   dbg_maxlen = 最长行长度             (== AT_LINE_MAX-1 说明触发行溢出)
+     *   dbg_ovf    = 发生过行溢出的次数
+     *   dbg_plus   = 以 '+' 开头的行数      (URC / +NWHTCSTATUS 走这条分支) */
+    uint16_t    dbg_lines;
+    uint16_t    dbg_maxlen;
+    uint16_t    dbg_ovf;
+    uint16_t    dbg_plus;
+
     char        urc[AT_URC_FIFO][AT_URC_LINE];
     uint8_t     urc_head;
     uint8_t     urc_cnt;
@@ -62,6 +73,20 @@ static struct {
 } s;
 
 #define TX_SUBMIT_TIMEOUT_MS  1000U         /* 提交/发送超过 1s 判失败 */
+
+/** @brief at_result_t -> 短字符串(收口诊断用) */
+static const char * res_name (at_result_t r)
+{
+    switch (r)
+    {
+        case AT_RES_OK:      return "OK";
+        case AT_RES_ERR:     return "ER";
+        case AT_RES_TIMEOUT: return "TMO";
+        case AT_RES_ABORT:   return "ABT";
+        case AT_RES_BUSY:    return "BSY";
+        default:             return "??";
+    }
+}
 
 void at_engine_init(void)
 {
@@ -283,6 +308,10 @@ at_result_t at_engine_start_ex(const char * cmd, uint32_t timeout_ms, at_mode_t 
     s.submitted = false;
     s.term_seen = false;
     s.term_res = AT_RES_PENDING;
+    s.dbg_lines = 0U;
+    s.dbg_maxlen = 0U;
+    s.dbg_ovf   = 0U;
+    s.dbg_plus  = 0U;
     s.send_t0 = s.now;
     s.timeout_ms = timeout_ms;
     urc_fifo_clear();                           /* 防止陈旧 URC 误匹配后续等待 */
@@ -298,6 +327,21 @@ at_result_t at_engine_start_ex(const char * cmd, uint32_t timeout_ms, at_mode_t 
 static void line_done(void)
 {
     s.line[s.line_len] = '\0';
+
+    /* 行组装诊断计数(零开销, 详见结构体注释) */
+    s.dbg_lines++;
+    if (s.line_len > s.dbg_maxlen)
+    {
+        s.dbg_maxlen = s.line_len;
+    }
+    if (s.line_overflow)
+    {
+        s.dbg_ovf++;
+    }
+    if ('+' == s.line[0])
+    {
+        s.dbg_plus++;
+    }
 
     if (s.line_overflow)
     {
@@ -458,6 +502,22 @@ at_result_t at_engine_poll(void)
         {
             break;
         }
+    }
+
+    /* 收口摘要: 只在本次 poll 把状态推进到 IDLE 的那一 tick 打印一次。
+     * 判读:
+     *   dbg_lines=0      -> 一个 \r\n 都没组装出来(收不到数据/收字节路径断)
+     *   dbg_maxlen=255   -> 触发行溢出(AT_LINE_MAX-1), 超长行不参与终止检测
+     *   dbg_plus=0       -> 没收到任何 '+' 开头行, +NWHTCSTATUS 没进来
+     *   dbg_plus>0 且 nw=-1 -> '+' 行有但 status 没解析出来 */
+    if ((ST_IDLE == s.state) && (AT_RES_PENDING != s.final))
+    {
+        printf("[ENG] close %-3s lines=%u max=%u ovf=%u plus=%u nw=%d len=%u ovfbuf=%u\r\n",
+               res_name(s.final),
+               (unsigned)s.dbg_lines, (unsigned)s.dbg_maxlen,
+               (unsigned)s.dbg_ovf,    (unsigned)s.dbg_plus,
+               s.resp.status, (unsigned)s.resp.len,
+               s.resp.overflow ? 1U : 0U);
     }
 
     return (ST_IDLE == s.state) ? s.final : AT_RES_PENDING;
