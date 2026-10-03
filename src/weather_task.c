@@ -146,6 +146,25 @@ static void hb_print (uint32_t now)
 /* ===================== 内部工具 ===================== */
 
 /**
+ * @brief 联网类命令完成后回到"等待"状态
+ *
+ * ⚠ 关键：只在**还没连上**时才回退状态。
+ *
+ * poll 的执行顺序是「先第 2 步取 URC → 再第 3 步收命令结果」，所以可能
+ * 在同一次 poll 里先把状态置成 CONNECTED（第 2 步拿到 +NWIP / +WFJAP），
+ * 紧接着第 3 步的 on_cmd_done() 才跑。若这里无条件写
+ * `status = WIFI_STAT_CONNECTING`，就会把刚刚确认的 CONNECTED 打回去，
+ * 阶梯重新开始 → 已经连着还在反复发 WFCAP/WFJAPA（2026-10-03 实测复现）。
+ */
+static void reconnect_if_needed (void)
+{
+    if (WIFI_STAT_CONNECTED != s.status)
+    {
+        s.status = WIFI_STAT_CONNECTING;
+    }
+}
+
+/**
  * @brief 把整个连接流程标记为已连上
  *
  * @param how 来源描述，仅用于日志
@@ -485,10 +504,15 @@ static void on_cmd_done (at_result_t r)
     switch (s.cmd)
     {
         case CMD_AT:
-            printf("[wx] AT self-test: %s, module is %s\r\n",
-                   (AT_RES_OK == r) ? "OK" : ((AT_RES_TIMEOUT == r) ? "TIMEOUT" : "ERROR"),
-                   (AT_RES_OK == r) ? "alive" : "not responding");
-            /* 即便超时也继续尝试联网, 可能只是回复时序原因 */
+            /* ⚠ 自检失败是**常态**，不是故障（2026-10-03 实测）：
+             *   冷启动第一条 AT 常只收到半个 'O' 就被模块自己吞掉，
+             *   引擎报 TIMEOUT@WAIT，但紧接着的 AT+NWIP=? 完全正常。
+             * 所以这里只记日志，绝不据此判定模块死活 —— 真正判定联网状态
+             * 靠阶梯第一级的 AT+NWIP=? 回读。 */
+            printf("[wx] AT self-test: %s (cold-start may truncate reply; "
+                   "continuing to NWIP query)\r\n",
+                   (AT_RES_OK == r) ? "OK" :
+                   ((AT_RES_TIMEOUT == r) ? "TIMEOUT (normal on cold start)" : "ERROR"));
             break;
 
         case CMD_TIME:
@@ -524,7 +548,7 @@ static void on_cmd_done (at_result_t r)
             printf("[wx] NWIP query %s (err=%d); waiting +NWIP / +WFJAP\r\n",
                    (AT_RES_OK == r) ? "OK" : "failed",
                    at_engine_resp()->err_code);
-            s.status = WIFI_STAT_CONNECTING;
+            reconnect_if_needed();
             break;
 
         case CMD_WFCAP:
@@ -534,17 +558,18 @@ static void on_cmd_done (at_result_t r)
             printf("[wx] WFCAP %s (err=%d); waiting +WFJAP / +NWIP\r\n",
                    (AT_RES_OK == r) ? "accepted" : "failed",
                    at_engine_resp()->err_code);
-            s.status = WIFI_STAT_CONNECTING;
+            reconnect_if_needed();
             break;
 
         case CMD_WFJAPA:
             printf("[wx] WFJAPA %s (err=%d); waiting +WFJAP / +NWIP\r\n",
                    (AT_RES_OK == r) ? "accepted" : "failed",
                    at_engine_resp()->err_code);
-            s.status = WIFI_STAT_CONNECTING;
+            reconnect_if_needed();
             /* 失败计数放在这里而不是 poll 里: on_cmd_done 每条命令只跑一次，
-             * 若在 poll 里按 tick 自增, 10ms 一跳几秒就误判"用尽"。 */
-            if (AT_RES_OK != r)
+             * 若在 poll 里按 tick 自增, 10ms 一跳几秒就误判"用尽"。
+             * ⚠ 已连上时不计失败: 命令本身回 OK, 且不该再退阶梯。 */
+            if ((AT_RES_OK != r) && (WIFI_STAT_CONNECTED != s.status))
             {
                 s.wifi_try++;
                 if (s.wifi_try >= WIFI_WFJAPA_MAX_TRY)
