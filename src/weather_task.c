@@ -40,7 +40,8 @@ typedef enum {
     CMD_TIME,          /**< AT+TIME */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
-    CMD_WFCAP          /**< AT+WFCAP 兜底重连 */
+    CMD_WFCAP,         /**< AT+WFCAP 兜底重连 */
+    CMD_HTTP           /**< AT+NWHTC (weather_http_get_start) */
 } cmd_owner_t;
 
 /* ===================== 状态 ===================== */
@@ -235,7 +236,12 @@ static bool fetch_weather_start (void)
 
     build_url(url, sizeof(url));
     printf("[wx] fetch %s\r\n", url);
-    return weather_http_get_start(url, WEATHER_HTTP_TIMEOUT_MS);
+    if (weather_http_get_start(url, WEATHER_HTTP_TIMEOUT_MS))
+    {
+        s.cmd = CMD_HTTP;            /* 重要: 标记引擎当前在服务 HTTP 命令 */
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -526,7 +532,7 @@ void weather_task_poll (void)
 
         if (AT_RES_PENDING != r)
         {
-            if (weather_http_busy())
+            if (CMD_HTTP == s.cmd)
             {
                 /* HTTP 命令: 结果归 weather_http */
                 weather_http_on_engine_done(r);
@@ -535,6 +541,7 @@ void weather_task_poll (void)
                     fetch_weather_done();
                     s.ui_dirty = true;
                     weather_http_clear();
+                    s.cmd = CMD_NONE;
                 }
             }
             else if (CMD_NONE != s.cmd)
