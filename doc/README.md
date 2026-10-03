@@ -182,15 +182,27 @@ Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop
 [wx] AT self-test sent
 [WIFI] OK
 [wx] AT self-test: OK, module is alive
-[WIFI] +WFJAP:1,'CMCC-xxxx',192.168.1.2      <- 自检在途时 URC 照样收, 不丢
+[wx] no +WFJAP in 8000ms, step=0 try=0     <- 模块不自连, 升一级
+[AT>] AT+WFCAP
+[WIFI] ERROR:-7                            <- NVRAM 无 profile
+[wx] WFCAP failed (err=-7)
+[AT>] AT+WFJAPA=CMCC-xxxx,<PASSWORD>         <- 自己发起, 既连又写 NVRAM
+[WIFI] OK
+[WIFI] +WFJAP:1,'CMCC-xxxx',192.168.1.2
 [wx] +WFJAP:1 -> CONNECTED, urc='+WFJAP:1,...'
 [wx] ip from URC: 192.168.1.2     <- IP 直接从 URC 解析, 不发 AT+NWIP=?
 ```
 
 要点：
 
-- 自检**失败不致命**，只打印 `TIMEOUT`/`ERROR` 后继续等 `+WFJAP`（模块冷启动可能慢）。
-- 自检只验「模块活着」，验不了「连上 AP 了」，因此仍保留 35s `AT+WFCAP` 兜底。
+- 自检**失败不致命**，只打印 `TIMEOUT`/`ERROR` 后继续走阶梯（模块冷启动可能慢）。
+- **模块不会自连**（实测）：上电连 `+INIT:DONE` 都没有，`AT+WFCAP` 回 `ERROR:-7`
+  = NVRAM 里没有 WiFi profile。所以被动等 `+WFJAP` 只是兼容 profile 已存在的快路径，
+  必须有 `AT+WFCAP` → `AT+WFJAPA=<ssid>,<pwd>` 两级主动兜底，否则会永久卡在等 URC。
+- 每一级超时 `WEATHER_CONNECT_TIMEOUT_MS`（8s，从 30s 降下来：模块不自连时
+  被动等待是纯浪费）。`AT+WFJAPA` 超时给 30s，因为要等 AP 握手。
+- `WFCAP` 失败会**直接跳到最高级**，不再空等一个周期 —— `ERROR:-7` 不会自己好。
+- 连续失败 3 次（`WIFI_WFJAPA_MAX_TRY`）回退到 `WFCAP` 重跑整条链。
 - IP 从 `+WFJAP:1` URC 行取（`+WFJAP:1,'SSID',IP` → 最后一个逗号后），
   **不要发 `AT+NWIP=?`**：该查询会因长响应丢字节而超时（DESIGN 风险#5）。
 

@@ -114,7 +114,7 @@ at_result_t at_engine_poll(void);       /* 每 tick 调用，非阻塞 */
 
 | 步骤 | GD32 做法 | RA 做法 |
 |---|---|---|
-| 联网 | `wifi_prov_start()` 阻塞重试3次 | **实测简化（2026-10-03 AUTOB）**：NVRAM 有 profile 时**上电自发** `+WFJAP:1`，实测 `+INIT:DONE` 后 **3.5s** 拿到 IP（`AT+GETFASTCONN:0` 表明与 fast connect 无关）。故主循环只需**被动等 URC**，无需 `AT+WFMODE=0`/`AT+RESTART`/`WFJAPA`。⚠ 但 `AT+WFCAP` 在无 profile 时回 `ERROR:-7`，所以首次仍需 `WFJAPA` 存 profile（阶段4 配网负责） |
+| 联网 | `wifi_prov_start()` 阻塞重试3次 | **实测必须自己发起（2026-10-03）**：模块**不会自连**（上电连 `+INIT:DONE` 都没有，`AT+WFCAP` 回 `ERROR:-7` = NVRAM 无 profile）。阶梯：`被动等 +WFJAP`(8s) → `AT+WFCAP` → `AT+WFJAPA=<ssid>,<pwd>`(30s，既连又写 NVRAM)。失败 3 次回退重跑整条链。阶段4 配网后前两级即命中 |
 | 取 IP | `wifi_get_ip()` | **从 `+WFJAP:1` URC 行直接解析**（`+WFJAP:1,'CMCC-xxxx',192.168.1.2` → 取最后一个逗号后的 IP）。⚠ **不要发 `AT+NWIP=?`**：该查询实测会因长响应丢字节而超时（与风险#5 同根因），且 URC 里本来就有 IP，属于多此一举 |
 | 对时 | lwip SNTP 钩子 | **不使用 RA 内部 RTC**（用户已确认）。实测：`AT+TZONE=28800`（**单位确为秒**）+ `AT+NWSNTP=1,ntp.aliyun.com,86400` → `AT+TIME` 回 `+TIME:2026-10-03,11:30:51`（真实本地时间）。主页时钟每分钟查一次 `AT+TIME` |
 | 拉天气 | 裸 socket GET，4KB 收包缓冲 | `AT+NWHTC=<seniverse now.json>,get` **PAYLOAD 模式**。✅ **裸 URL 即可，不要单引号**（风险#3 已清零：裸/引号结果完全一致 `len=690 body_len=274`）；✅ URL 含 `&`/`?` **不需转义**（URI 是第一个逗号前的单参数）；⚠ 串长必须 < `AT_CMD_MAX`(180) |
@@ -321,7 +321,7 @@ GD32 版在连接失败等状态下长按切配网有概率不生效，源码分
 | 1 | **`AT+NWHTC` 响应回传格式**：payload 前是否有 HTTP 头、以什么标志结束（决定采集状态机） | **✅ 已清零（2026-10-03 实测，与原假设不同）**。`HELP` 自报 `AT+NWHTC=<uri>,<option>(,<msg>)`，option ∈ get\|post\|put。真实时序：① 发命令 → **立刻回一个裸 `OK`（仅 6 字节同步回执）** → ② **异步流式推送完整 HTTP 响应，含响应头**（实测有 `Set-Cookie`/`Vary`/`Connection: close`）→ ③ 正文 → ④ 末尾 `+NWHTCSTATUS:<n>`（`0`=成功）才是**真正结束标志**。<br>结论：① 结束标志**不是 `OK`**（把 `OK` 当结束只拿到 6 字节）；② **必须先切 `\r\n\r\n`** 再交 cJSON；③ 缓冲要够 —— 百度首页实测 **667KB / 推 60s**，4KB 只够心知这类小 JSON；④ **同一时刻只能一条 NWHTC 在途**。已实现为 `at_engine` 的 `AT_MODE_PAYLOAD` |
 | 2 | **读取 DA16200 当前时间的 AT 命令** | **✅ 已清零**。读：`AT+TIME` → `+TIME:<date>,<time>`；写：`AT+TIME=<date>,<time>`。时区 `AT+TZONE` 单位**确认为秒**（`AT+TZONE=?` → `+TZONE:28800`），`AT+TZONE=28800` 生效。SNTP `AT+NWSNTP=<sntp>(,<server_ip>,<period>)` → `AT+NWSNTP=1,ntp.aliyun.com,86400` 后 `+TIME:2026-10-03,11:30:51` 为**真实本地时间(UTC+8)**。`AT+DATE` **不存在**（`ERROR:-1`）。DESIGN §5 假设全部成立 |
 | 3 | AT 命令中 URL 特殊字符（`&` `?` `,`）是否需要单引号包裹 | **✅ 已清零（2026-10-03 心知 now.json 实测）**：裸 URL 直接可用，`&`/`?` 不转义、单引号可加可不加，三种写法结果一致（`len=690 body_len=274`）。从 `HELP` 语法看 URI 是**第一个逗号前的单参数**，单引号仅用于**值内含逗号**的场景 |
-| 4 | DA16200 开机自动回连行为（NVRAM 有 profile 时） | **✅ 已清零（2026-10-03 AUTOB + 天气任务实测）**：存过 profile 后**上电自发** `+WFJAP:1`，**不需要**发任何连接命令，`+INIT:DONE` 后约 **3.5s** 拿到 IP；`AT+GETFASTCONN:0` 表明与 fast connect 机制无关。⚠ 连带结论：**IP 也直接从这条 URC 里取**，省掉 `AT+NWIP=?`（该查询会因长响应丢字节超时，见风险#5）。无 profile 时 `AT+WFCAP` 回 `ERROR:-7`，需 `WFJAPA` 存 profile（阶段4 配网负责） |
+| 4 | DA16200 开机自动回连行为（NVRAM 有 profile 时） | **✅ 已清零（2026-10-03 天气任务实测推翻 AUTOB 的乐观结论）**。实测**不会自连**：上电后连 `+INIT:DONE` 都没有，`AT` 自检 `OK` 说明模块活着，但等 30s 无任何 `+WFJAP`，`AT+WFCAP` 回 **`ERROR:-7` = NVRAM 无 profile**。两条信息合起来排除"模块死了"和"模块启动慢"，唯一解释就是**没存过 profile，没东西可连**。<br>修正后的设计：**必须自己发起连接**，阶梯为 `被动等 +WFJAP → AT+WFCAP → AT+WFJAPA=<ssid>,<pwd>`，超时 30s→**8s**（被动等待在不自连的模块上是纯浪费）。WFJAPA 既连接又写 NVRAM，故后续开机可走快路径；连续失败 3 次后回退到 WFCAP 重跑整条链。阶段4 配网完成后 profile 已存，前两级即命中 |
 | 5 | 长响应完整性 | **✅ 已清零（是丢字节，非截断）**：根因 = `__io_putchar` 逐字节忙等 TX 完成 + WIFI RX 环仅 512B，115200 下零余量溢出静默丢。修法 = USB TX 环 4KB 非阻塞 `usb_tx_pump()`（三指针，区分"已入队"与"硬件已发完"）+ WIFI RX 环 8KB。**已验证通过**：`AT+WFSCAN` 15 条 AP 全部 BSSID 完整 6 段、字段结构一致、零缺段零粘行（修复前 20 条里有 10 处硬伤），`wifi_rx_drop=0`、`usb_tx_drop=0` |
 
 阶段4配网调研（阶段4开工前清零）：
@@ -338,8 +338,8 @@ GD32 版在连接失败等状态下长按切配网有概率不生效，源码分
 |---|---|---|
 | 6 | ~~OLED 接线~~ 已确认与 `RA4M2OLED` 示例一致；剩余：机械按键 P005/P006 的极性/上拉方式 | 实现时看原理图或实测 |
 | 7 | 心知天气免费版限频 ~20 次/时 | 沿用 15 分钟刷新即可 |
-| 11 | **DA16200 偶发「要插拔几次才正常」** | **✅ 已清零（2026-10-03）——是软件问题，不是硬件**。开机 `AT` 自检实测 `OK`（`[ENG] close=OK lines=1 max=2`），证明模块从一开始就在正常应答。之前"多次插拔才行"的观感来自**日志假象**：诊断类打印把 4KB USB TX 环灌满后 `__io_putchar()` 静默丢字节，真正的 `[WIFI]`/`[wx]` 行被挤掉，看起来像程序没反应。已定死"诊断日志必须低频"的约定（doc/README.md §3.4.1），并改用 `at_engine_diag()` 快照 + 30s 心跳定位 |
-| 12 | 天气链路「收到完整响应但不解析」 | **待清零**。已排除：`s.cmd` 归属错分发（`be68f18` 修）、`weather_http_busy()` 被提前清（`be68f18` 修）、`line_overflow` 粘住（已验证第 373 行正常清除）、`+NWHTCSTATUS` 前缀匹配（12 字节逐字节核对无误）、`split_http` 边界（已审，无越界）。下一次烧录用 `[ENG] close=` 的 `plus`/`nw`/`len` 与 `[hb]` 的 `rx` 字段定位 |
+| 11 | **DA16200「要插拔几次才正常」** | **✅ 已清零：是 NVRAM 无 profile，不是硬件、也不是软件 bug**。开机 `AT` 自检 `OK`（模块活着）但等 30s 无 `+WFJAP`、`AT+WFCAP` 回 `ERROR:-7`（NVRAM 无 profile）→ 模块根本没东西可连。修法：实现 `WFCAP → WFJAPA=<ssid>,<pwd>` 主动连接阶梯（`d978796`）。<br>附带纠正一个错误观感：中途"程序不动了"是诊断日志把 4KB USB TX 环灌满、`__io_putchar()` 静默丢字节所致（`a17d448`），已定死"诊断日志必须低频"的约定（doc/README.md §3.4.1） |
+| 12 | 天气链路「收到完整响应但不解析」 | **待清零**（被风险#11 挡在前面：模块连不上，根本到不了这一步）。已排除：`s.cmd` 归属错分发（`be68f18` 修）、`weather_http_busy()` 被提前清（`be68f18` 修）、`line_overflow` 粘住（已验证正常清除）、`+NWHTCSTATUS` 前缀匹配（逐字节核对无误）、`split_http` 边界（已审，无越界）。下次用 `[ENG] close=` 的 `plus`/`nw`/`len` 与 `[hb]` 的 `rx` 定位 |
 
 ## 10. 决策记录（全部已确认）
 
