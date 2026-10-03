@@ -1,0 +1,428 @@
+/**
+ * @file  at_engine.c
+ * @brief DA16200 AT 命令引擎实现（异步两段式）
+ *
+ * 流: start(提交发送) -> SENDING(TX完成) -> WAIT(采集响应直到 OK/ERROR/超时)
+ * 输入: at_engine_rx() 由 hal_entry 的 WIFI RX 路径逐字节注入。
+ */
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include "at_engine.h"
+#include "hal_data.h"
+
+extern volatile bool wifi_uart_send_complete_flag;   /* hal_entry.c */
+extern volatile uint32_t wifi_rx_byte_cnt;          /* hal_entry.c: 诊断计数 */
+extern volatile uint32_t wifi_tx_done_cnt;         /* hal_entry.c: 诊断计数 */
+extern volatile uint32_t wifi_rx_drop_cnt;         /* hal_entry.c: 诊断计数 */
+
+typedef enum {
+    ST_IDLE = 0,
+    ST_SENDING,                             /* 等 UART TX 完成 */
+    ST_WAIT                                 /* 采集响应直到终止/超时 */
+} eng_state_t;
+
+static struct {
+    eng_state_t state;
+    bool        submitted;                  /* R_SCI_UART_Write 已提交 */
+    uint32_t    send_t0;                    /* 发送起点(ms), 用于 TX 超时 */
+    uint32_t    deadline;                   /* 响应截止(ms) */
+    uint32_t    timeout_ms;
+    uint32_t    now;
+
+    char        cmd[AT_CMD_MAX];            /* 含自动补的 \r\n, NUL 结尾 */
+    uint16_t    cmd_len;
+    at_mode_t   mode;                       /* CMD / PAYLOAD(见 at_engine.h) */
+
+    at_result_t final;                      /* 最近一次完成结果 */
+    at_resp_t   resp;
+
+    /* 终止行竞态修复(2026-10-03):
+     * 主循环 10ms 才 poll 一次, 而 5 字节命令 ~430us 就发完、模块 ~1ms 就回 OK。
+     * 若只在 ST_WAIT 里认终止行, OK 会在 ST_SENDING 期间到达而被丢弃 -> 必然超时。
+     * 改为: 任何非 IDLE 状态收到终止行都记下, 由 poll 统一收口。 */
+    bool        term_seen;
+    at_result_t term_res;
+
+    char        line[AT_LINE_MAX];          /* 行检测缓冲 */
+    uint16_t    line_len;
+    bool        line_overflow;
+
+    char        urc[AT_URC_FIFO][AT_URC_LINE];
+    uint8_t     urc_head;
+    uint8_t     urc_cnt;
+
+    bool        trace;                            /* URC 打时间戳(被动监听) */
+    uint32_t    trace_t0;
+
+    /* sticky 环: 曾出现过的 URC, 与上面会被 start() 清空的消费 FIFO 完全独立,
+     * 保证 45s 被动监听期内 URC 超过 FIFO 深度也不漏判(风险#4)。 */
+    char        seen_buf[AT_SEEN_MAX][AT_URC_LINE];
+    uint8_t     seen_cnt;
+} s;
+
+#define TX_SUBMIT_TIMEOUT_MS  1000U         /* 提交/发送超过 1s 判失败 */
+
+void at_engine_init(void)
+{
+    memset(&s, 0, sizeof(s));
+    s.final = AT_RES_PENDING;
+    s.mode = AT_MODE_CMD;
+    s.resp.err_code = -1;
+    s.resp.status = -1;
+}
+
+void at_engine_tick(uint32_t elapsed_ms)
+{
+    s.now += elapsed_ms;
+}
+
+uint32_t at_engine_now_ms(void)
+{
+    return s.now;
+}
+
+bool at_engine_idle(void)
+{
+    return (ST_IDLE == s.state);
+}
+
+const at_resp_t * at_engine_resp(void)
+{
+    return &s.resp;
+}
+
+static void urc_fifo_clear(void)
+{
+    s.urc_head = 0;
+    s.urc_cnt = 0;
+}
+
+static void urc_push(const char * line)
+{
+    uint8_t idx;
+    size_t n;
+
+    if (s.urc_cnt < AT_URC_FIFO)
+    {
+        idx = (uint8_t)((s.urc_head + s.urc_cnt) % AT_URC_FIFO);
+        s.urc_cnt++;
+    }
+    else                                        /* 满则丢最旧, 保最新 */
+    {
+        idx = s.urc_head;
+        s.urc_head = (uint8_t)((s.urc_head + 1U) % AT_URC_FIFO);
+    }
+
+    n = strlen(line);
+    if (n > (size_t)(AT_URC_LINE - 1U))
+    {
+        n = (size_t)(AT_URC_LINE - 1U);
+    }
+    memcpy(s.urc[idx], line, n);
+    s.urc[idx][n] = '\0';
+
+    if (s.trace)                                /* 被动监听: 逐条打时间戳 */
+    {
+        printf("[URC] +%6ums %s\r\n", (unsigned)(s.now - s.trace_t0), s.urc[idx]);
+    }
+
+    if (s.seen_cnt < AT_SEEN_MAX)                /* sticky 记录(满则丢最旧) */
+    {
+        memcpy(s.seen_buf[s.seen_cnt], s.urc[idx], AT_URC_LINE);
+        s.seen_cnt++;
+    }
+    else
+    {
+        memmove(&s.seen_buf[0], &s.seen_buf[1], (size_t)(AT_SEEN_MAX - 1U) * AT_URC_LINE);
+        memcpy(s.seen_buf[AT_SEEN_MAX - 1U], s.urc[idx], AT_URC_LINE);
+    }
+}
+
+bool at_engine_urc_seen(const char * prefix)
+{
+    size_t plen = strlen(prefix);
+    uint8_t i;
+
+    for (i = 0; i < s.seen_cnt; i++)
+    {
+        if (0 == strncmp(s.seen_buf[i], prefix, plen))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void at_engine_urc_seen_clear(void)
+{
+    s.seen_cnt = 0;
+}
+
+void at_engine_urc_trace(bool on)
+{
+    s.trace = on;
+    s.trace_t0 = s.now;
+}
+
+bool at_engine_urc_take(const char * prefix)
+{
+    size_t plen = strlen(prefix);
+    uint8_t i;
+
+    for (i = 0; i < s.urc_cnt; i++)
+    {
+        uint8_t idx = (uint8_t)((s.urc_head + i) % AT_URC_FIFO);
+
+        if (0 == strncmp(s.urc[idx], prefix, plen))
+        {
+            uint8_t j;
+            for (j = i; j + 1U < s.urc_cnt; j++)        /* 移除该槽 */
+            {
+                uint8_t to = (uint8_t)((s.urc_head + j) % AT_URC_FIFO);
+                uint8_t from = (uint8_t)((s.urc_head + j + 1U) % AT_URC_FIFO);
+                memcpy(s.urc[to], s.urc[from], AT_URC_LINE);
+            }
+            s.urc_cnt--;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+at_result_t at_engine_start(const char * cmd, uint32_t timeout_ms)
+{
+    return at_engine_start_ex(cmd, timeout_ms, AT_MODE_CMD);
+}
+
+at_result_t at_engine_start_ex(const char * cmd, uint32_t timeout_ms, at_mode_t mode)
+{
+    size_t n;
+
+    if (ST_IDLE != s.state)
+    {
+        return AT_RES_BUSY;
+    }
+
+    n = strlen(cmd);
+    if ((0U == n) || (n > (size_t)(AT_CMD_MAX - 2U)))
+    {
+        return AT_RES_ERR;
+    }
+
+    memcpy(s.cmd, cmd, n);
+    s.cmd_len = (uint16_t)n;
+
+    if (('\r' != s.cmd[s.cmd_len - 1U]) && ('\n' != s.cmd[s.cmd_len - 1U]))
+    {
+        s.cmd[s.cmd_len++] = '\r';              /* 没有行结束则自动补 \r\n */
+        s.cmd[s.cmd_len++] = '\n';
+    }
+
+    s.cmd[s.cmd_len] = '\0';
+
+    s.resp.len = 0;
+    s.resp.overflow = false;
+    s.resp.err_code = -1;
+    s.resp.status = -1;
+    s.mode = mode;
+    s.line_len = 0;
+    s.line_overflow = false;
+    s.final = AT_RES_PENDING;
+    s.submitted = false;
+    s.term_seen = false;
+    s.term_res = AT_RES_PENDING;
+    s.send_t0 = s.now;
+    s.timeout_ms = timeout_ms;
+    urc_fifo_clear();                           /* 防止陈旧 URC 误匹配后续等待 */
+
+    s.state = ST_SENDING;
+
+    printf("[AT>] %s", s.cmd);                   /* cmd 已以 \r\n 结尾 */
+
+    return AT_RES_PENDING;
+}
+
+/* 行结束处理: 终止行 / URC 检测 */
+static void line_done(void)
+{
+    s.line[s.line_len] = '\0';
+
+    if (s.line_overflow)
+    {
+        return;
+    }
+
+    if (0 == strcmp(s.line, "OK"))
+    {
+        /* PAYLOAD 模式: OK 只是同步回执, 正文还在流, 不能终止 */
+        if ((AT_MODE_CMD == s.mode) && (ST_IDLE != s.state))
+        {
+            s.term_seen = true;
+            s.term_res  = AT_RES_OK;
+        }
+    }
+    else if (0 == strncmp(s.line, "ERROR", 5))
+    {
+        if (ST_IDLE != s.state)                 /* 两种模式都立即终止: 不会有正文 */
+        {
+            const char * dash = strchr(s.line, '-');
+
+            s.resp.err_code = (NULL != dash) ? atoi(dash + 1) : -1;
+            s.term_seen = true;
+            s.term_res  = AT_RES_ERR;
+        }
+    }
+    else if (0 == strncmp(s.line, "+NWHTCSTATUS", 12))
+    {
+        const char * colon = strchr(s.line, ':');
+
+        /* base 0: 同时兼容 "0" 与 "0x00" 两种写法 */
+        if (NULL != colon)
+        {
+            s.resp.status = (int)strtol(colon + 1, NULL, 0);
+        }
+
+        if ((AT_MODE_PAYLOAD == s.mode) && (ST_IDLE != s.state))
+        {
+            s.term_seen = true;
+            s.term_res  = (0 == s.resp.status) ? AT_RES_OK : AT_RES_ERR;
+        }
+
+        urc_push(s.line);
+    }
+    else if ('+' == s.line[0])
+    {
+        urc_push(s.line);                       /* URC: 空闲与在途都收 */
+    }
+}
+
+void at_engine_rx(char c)
+{
+    /* 1) 原始字节采集(命令在途期间, 含 SENDING 尾部与 WAIT) */
+    if (ST_IDLE != s.state)
+    {
+        if (s.resp.len < (uint16_t)AT_RESP_BUF_SIZE)
+        {
+            s.resp.buf[s.resp.len++] = c;
+        }
+        else
+        {
+            s.resp.overflow = true;
+        }
+    }
+
+    /* 2) 行组装(始终进行, 空闲期也要识别 URC) */
+    if (('\r' == c) || ('\n' == c))
+    {
+        if (s.line_len > 0U)
+        {
+            line_done();
+            s.line_len = 0;
+            s.line_overflow = false;
+        }
+    }
+    else if (s.line_len < (AT_LINE_MAX - 1U))
+    {
+        s.line[s.line_len++] = c;
+    }
+    else
+    {
+        s.line_overflow = true;                 /* 超长行截断, 不参与终止检测 */
+    }
+}
+
+/* 超时诊断: 区分"TX 没发出去"(SENDING)与"TX 发出去了但模块没回"(WAIT) */
+static void eng_timeout (const char * stage)
+{
+    printf("[ENG] TIMEOUT@%s  wifi_rx=%lu wifi_txdone=%lu rxdrop=%lu\r\n",
+           stage, (unsigned long)wifi_rx_byte_cnt, (unsigned long)wifi_tx_done_cnt,
+           (unsigned long)wifi_rx_drop_cnt);
+}
+
+at_result_t at_engine_poll(void)
+{
+    switch (s.state)
+    {
+        case ST_SENDING:
+        {
+            if (s.term_seen)                    /* 终止行已到: 优先收口 */
+            {
+                s.state = ST_IDLE;
+                s.final = s.term_res;
+                break;
+            }
+
+            if (!s.submitted)
+            {
+                wifi_uart_send_complete_flag = false;
+                if (FSP_SUCCESS == R_SCI_UART_Write(&g_wifi_uart_ctrl,
+                                                    (uint8_t const *)s.cmd,
+                                                    s.cmd_len))
+                {
+                    s.submitted = true;
+                    s.send_t0 = s.now;
+                }
+                else if ((s.now - s.send_t0) > TX_SUBMIT_TIMEOUT_MS)
+                {
+                    printf("[ENG] WRITE REJECTED (FSP err) cmd='%s'\r\n", s.cmd);
+                    s.state = ST_IDLE;
+                    s.final = AT_RES_TIMEOUT;
+                }
+            }
+            else if (wifi_uart_send_complete_flag)
+            {
+                wifi_uart_send_complete_flag = false;
+                s.state = ST_WAIT;
+                s.deadline = s.now + s.timeout_ms;
+            }
+            else if ((s.now - s.send_t0) > TX_SUBMIT_TIMEOUT_MS)
+            {
+                eng_timeout("SENDING");         /* TX 完成中断没来 */
+                s.state = ST_IDLE;
+                s.final = AT_RES_TIMEOUT;
+            }
+            break;
+        }
+
+        case ST_WAIT:
+        {
+            if (s.term_seen)
+            {
+                s.state = ST_IDLE;
+                s.final = s.term_res;
+                break;
+            }
+
+            if (s.now >= s.deadline)
+            {
+                eng_timeout("WAIT");            /* 发出去了, 模块没回 */
+                s.state = ST_IDLE;
+                s.final = AT_RES_TIMEOUT;
+            }
+            break;
+        }
+
+        default:
+        {
+            break;
+        }
+    }
+
+    return (ST_IDLE == s.state) ? s.final : AT_RES_PENDING;
+}
+
+void at_engine_abort(void)
+{
+    s.state = ST_IDLE;
+    s.final = AT_RES_ABORT;
+    s.submitted = false;
+    s.term_seen = false;
+}
+
+uint32_t at_engine_rx_len(void)
+{
+    return s.resp.len;
+}
