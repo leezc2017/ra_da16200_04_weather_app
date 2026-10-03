@@ -516,6 +516,7 @@ static void on_cmd_done (at_result_t r)
 {
     char time5[6];
     char date11[8];
+    bool start_link = false;
 
     switch (s.cmd)
     {
@@ -525,10 +526,14 @@ static void on_cmd_done (at_result_t r)
              *   引擎报 TIMEOUT@WAIT，但紧接着的 AT+NWIP=? 完全正常。
              * 所以这里只记日志，绝不据此判定模块死活 —— 真正判定联网状态
              * 靠阶梯第一级的 AT+NWIP=? 回读。 */
-            printf("[wx] AT self-test: %s (cold-start may truncate reply; "
-                   "continuing to NWIP query)\r\n",
+            printf("[wx] AT self-test: %s (cold-start may truncate reply)\r\n",
                    (AT_RES_OK == r) ? "OK" :
                    ((AT_RES_TIMEOUT == r) ? "TIMEOUT (normal on cold start)" : "ERROR"));
+            /* 自检是上电后第一条命令, 等它结束就证明串口通了。此时立刻发
+             * AT+NWIP=?, 不必再空等一个 WEATHER_CONNECT_TIMEOUT_MS 周期 ——
+             * 实测该查询 ~50ms 就回, 白等 8s 只会让首屏多黑 8 秒。
+             * 注意发送要放在函数末尾(清完 s.cmd 之后), 否则会被覆盖。 */
+            start_link = (CMD_NONE != s.cmd);
             break;
 
         case CMD_TIME:
@@ -604,6 +609,15 @@ static void on_cmd_done (at_result_t r)
     }
 
     s.cmd = CMD_NONE;
+
+    /* 开机自检一结束就主动查 IP(见 CMD_AT 分支的注释)。
+     * 必须在此处发: 上面的 at_send_owned 会写 s.cmd, 在 switch 之前发会被覆盖。 */
+    if (start_link)
+    {
+        s.wifi_step  = WIFI_STEP_NWIP_QUERY;
+        s.connect_t0 = at_engine_now_ms();
+        (void)at_send_owned("AT+NWIP=?", 2500U, CMD_NWIP);
+    }
 }
 
 /* ===================== 时间显示 ===================== */
