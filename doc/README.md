@@ -126,7 +126,40 @@ PC 串口助手 ──USB──> RA4M2 (SCI9) ──板内UART──> DA16200 (S
 GBK SSID 被劈开——**丢字节，不是缓冲区截断**，任何基于 `[WIFI]` 行的解析都不可信。
 
 现配置：USB TX 环 4KB、WIFI RX 环 8KB（容 2KB+ 突发），`printf` 满时丢并累加
-`usb_tx_drop_cnt`，在 `AUTO` 汇总里打印（**验收要求恒为 0**）。
+`usb_tx_drop_cnt`，在 `AUTO` 汇总和 `[hb]` 心跳里打印（**验收要求恒为 0**）。
+
+#### ⚠ 反向教训：诊断日志本身也会淹掉日志（2026-10-03）
+
+排查"程序不动了"时，曾在 `at_engine_poll()` 里加了一条**每 tick 都打印**的收口摘要
+（引擎停在 `ST_IDLE` 时 `s.final` 仍是上次结果，于是每 10ms 打印一行 ~70B）。
+**600ms 就灌满 4KB 环**，`__io_putchar()` 满则丢（它不阻塞）→ 真正的
+`[WIFI]`/`[wx]` 全被挤掉 → 板上看起来像卡死，主循环其实跑得好好的。
+
+由这条得到的硬性约定：
+
+| 约定 | 说明 |
+|---|---|
+| 收口类日志必须判"本次 poll 是否真的迁移了状态" | 不能只看 `state == IDLE`，要用进入时的快照比对（`was_idle`） |
+| 诊断日志一律**低频** | 心跳 30s 一行（`WEATHER_HB_DIAG_MS`），单行 ≤100B |
+| 需要看引擎状态就取**快照**而不是加打印 | `at_engine_diag()` / `at_engine_diag_t` |
+| 判断"程序是否活着"看 `[hb]` 是否在刷新 | `[hb]` 推进但 `[WIFI]` 不动 → WIFI 口问题；`[hb]` 也不动 → 主循环真卡住 |
+
+`[hb]` 行字段判读：
+
+```
+[hb] 12s eng=0 mode=0 urc=0/0 rx=18 ln=1 plus=1 wifi_rx=18 drop=0 usb_drop=0 st=1 wx=-- 0C
+     │        │        │       │        │      │     │        │    │      │      └ 天气
+     │        │        │       │        │      │     │        │    │      └ wifi_status_t
+     │        │        │       │        │      │     │        │    └ 2=CONNECTING
+     │        │        │       │        │      │     │        └ usb_tx_drop（必须恒为 0）
+     │        │        │       │        │      │     └ wifi_rx_drop（必须恒为 0）
+     │        │        │       │        │      └ 开机至今收到的 WIFI 字节数（不涨=口没数据）
+     │        │        │       │        └ 以 '+' 开头的行数
+     │        │        │       └ 组装完成的行数
+     │        │        └ 已组装行/已见 URC（URC FIFO 深度 / sticky 记录数）
+     │        └ at_mode_t: 0=CMD 1=PAYLOAD
+     └ 引擎状态: 0=IDLE 1=SENDING 2=WAIT
+```
 
 ### 3.5 初始化顺序
 
