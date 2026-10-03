@@ -12,6 +12,7 @@
  * 三态判定逻辑逐行保留：长按在按住期间判定并抢占（取消双击等待），
  * 短按需等双击窗口超时后才上报，两者互斥。
  */
+#include <stdio.h>      /* printf: 打印引脚配置, 便于确认按键接线极性 */
 #include <string.h>
 #include "hal_data.h"
 #include "key_scan.h"

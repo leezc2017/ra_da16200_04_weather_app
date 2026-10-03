@@ -47,6 +47,24 @@ typedef struct {
     int      status;                      /* PAYLOAD 模式: +NWHTCSTATUS:<n> 的 n, 未收到为 -1 */
 } at_resp_t;
 
+/**
+ * @brief 引擎快照（低频心跳诊断用）
+ *
+ * 为什么不靠"多打日志"排查：诊断日志本身会挤占 USB TX 环，10ms 一行就足以
+ * 把真正的 [WIFI]/[wx] 全部挤掉（__io_putchar 满则丢），表现为"程序不动了"。
+ * 所以改为**低频快照**，需要时由上层周期打印。
+ */
+typedef struct {
+    uint8_t  state;                       /* 引擎内部状态机值: 0=IDLE 1=SENDING 2=WAIT */
+    uint8_t  mode;                        /* at_mode_t */
+    uint8_t  urc_cnt;                     /* URC 消费 FIFO 里待取的条数 */
+    uint8_t  seen_cnt;                    /* sticky "曾出现过" 记录条数 */
+    uint16_t line_len;                    /* 当前正在组装的那一行的长度 */
+    uint32_t rx_bytes;                    /* 引擎启动至今收到的 WIFI 字节数 */
+    uint32_t lines;                       /* 启动至今组装完成的行数 */
+    uint32_t plus_lines;                  /* 其中以 '+' 开头的行数(URC/终止行) */
+} at_engine_diag_t;
+
 void             at_engine_init(void);
 void             at_engine_tick(uint32_t elapsed_ms);   /* 每主循环 tick 调用 */
 uint32_t         at_engine_now_ms(void);
@@ -58,7 +76,8 @@ const at_resp_t * at_engine_resp(void);
 void             at_engine_abort(void);
 void             at_engine_rx(char c);                   /* WIFI 口每字节注入 */
 uint32_t         at_engine_rx_len(void);                 /* 诊断用: 已采集的响应字节数 */
-bool             at_engine_urc_take(const char * prefix);/* 匹配并消费一条 URC */
+bool             at_engine_urc_take(const char * prefix);/* 匹配并消费一条 URC(只给 bool) */
+void             at_engine_diag(at_engine_diag_t * out);  /* 取状态快照 */
 
 /* --- 被动监听用（风险#4 开机自动重连）---
  * urc_seen() 只查不删, 且不受 4 槽 FIFO 深度限制(用 sticky 槽位记录),
@@ -68,15 +87,15 @@ void             at_engine_urc_seen_clear(void);
 void             at_engine_urc_trace(bool on);          /* 每条 URC 打时间戳 */
 
 /**
- * @brief 匹配并取出一条 URC（消费型，返回行内容）
+ * @brief 匹配并取出一条 URC 的行内容（消费型）
  *
- *与at_engine_urc_take 的区别：take 只返回 bool、不给行内容。
- *用于需要解析 URC 载荷的场景（如 +WFJAP:1,'ssid','ip' 里提取 IP）。
+ * 与 at_engine_urc_take() 的区别：take 只返回 bool，本函数把整行拷出来，
+ * 用于需要解析 URC 载荷的场景（如从 +WFJAP:1,'ssid','ip' 里提取 IP）。
  *
- * @param prefix  匹配前缀（如 "+WFJAP:1"）
- * @param out     输出缓冲
+ * @param prefix   匹配前缀（如 "+WFJAP:1"）
+ * @param out      输出缓冲
  * @param out_size 缓冲大小
- * @return true=找到并拷贝成功，false=未找到或缓冲太小
+ * @return true=找到并拷贝成功；false=未找到或缓冲太小
  */
 bool             at_engine_urc_get(const char * prefix, char * out, uint16_t out_size);
 

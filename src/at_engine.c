@@ -59,6 +59,12 @@ static struct {
     uint16_t    dbg_ovf;
     uint16_t    dbg_plus;
 
+    /* 运行期累计(不随 start_ex 清零), 供 at_engine_diag() 心跳快照用。
+     * 与上面 dbg_* 的区别: dbg_* 是"单条命令"的收口摘要, 这三个是"开机至今"。 */
+    uint32_t    rx_total;
+    uint32_t    line_total;
+    uint32_t    plus_total;
+
     char        urc[AT_URC_FIFO][AT_URC_LINE];
     uint8_t     urc_head;
     uint8_t     urc_cnt;
@@ -100,6 +106,23 @@ void at_engine_init(void)
 void at_engine_tick(uint32_t elapsed_ms)
 {
     s.now += elapsed_ms;
+}
+
+void at_engine_diag(at_engine_diag_t * out)
+{
+    if (NULL == out)
+    {
+        return;
+    }
+
+    out->state      = (uint8_t)s.state;
+    out->mode       = (uint8_t)s.mode;
+    out->urc_cnt    = s.urc_cnt;
+    out->seen_cnt   = s.seen_cnt;
+    out->line_len   = s.line_len;
+    out->rx_bytes   = s.rx_total;
+    out->lines      = s.line_total;
+    out->plus_lines = s.plus_total;
 }
 
 uint32_t at_engine_now_ms(void)
@@ -330,6 +353,7 @@ static void line_done(void)
 
     /* 行组装诊断计数(零开销, 详见结构体注释) */
     s.dbg_lines++;
+    s.line_total++;
     if (s.line_len > s.dbg_maxlen)
     {
         s.dbg_maxlen = s.line_len;
@@ -341,6 +365,7 @@ static void line_done(void)
     if ('+' == s.line[0])
     {
         s.dbg_plus++;
+        s.plus_total++;
     }
 
     if (s.line_overflow)
@@ -394,6 +419,8 @@ static void line_done(void)
 
 void at_engine_rx(char c)
 {
+    s.rx_total++;
+
     /* 1) 原始字节采集(命令在途期间, 含 SENDING 尾部与 WAIT) */
     if (ST_IDLE != s.state)
     {
@@ -437,6 +464,12 @@ static void eng_timeout (const char * stage)
 
 at_result_t at_engine_poll(void)
 {
+    /* 进入时已空闲 -> 本次 poll 不做任何状态迁移, 不能打收口摘要。
+     * ⚠ 少了这个判断, 空闲期每 tick 都会打印 final(上一次结果),
+     *   10ms 一行把 USB TX 环刷爆, 真正的 [WIFI]/[wx] 日志全被挤掉
+     *   (表现为"程序不动了"), usb_tx_drop_cnt 也会一路上涨。 */
+    const bool was_idle = (ST_IDLE == s.state);
+
     switch (s.state)
     {
         case ST_SENDING:
@@ -504,15 +537,16 @@ at_result_t at_engine_poll(void)
         }
     }
 
-    /* 收口摘要: 只在本次 poll 把状态推进到 IDLE 的那一 tick 打印一次。
+    /* 收口摘要: 仅在本次 poll 把状态从"在途"推进到 IDLE 的那一 tick 打印一次。
      * 判读:
-     *   dbg_lines=0      -> 一个 \r\n 都没组装出来(收不到数据/收字节路径断)
-     *   dbg_maxlen=255   -> 触发行溢出(AT_LINE_MAX-1), 超长行不参与终止检测
-     *   dbg_plus=0       -> 没收到任何 '+' 开头行, +NWHTCSTATUS 没进来
-     *   dbg_plus>0 且 nw=-1 -> '+' 行有但 status 没解析出来 */
-    if ((ST_IDLE == s.state) && (AT_RES_PENDING != s.final))
+     *   lines=0        -> 一个 \r\n 都没组装出来(收不到数据/收字节路径断)
+     *   max=255        -> 触发行溢出(AT_LINE_MAX-1), 超长行不参与终止检测
+     *   plus=0         -> 没收到任何 '+' 开头行, +NWHTCSTATUS 没进来
+     *   plus>0 且 nw=-1 -> '+' 行有但 status 没解析出来
+     *   ovfbuf=1       -> 4KB 响应缓冲溢出(正文被截) */
+    if ((!was_idle) && (ST_IDLE == s.state) && (AT_RES_PENDING != s.final))
     {
-        printf("[ENG] close %-3s lines=%u max=%u ovf=%u plus=%u nw=%d len=%u ovfbuf=%u\r\n",
+        printf("[ENG] close=%s lines=%u max=%u ovf=%u plus=%u nw=%d len=%u ovfbuf=%u\r\n",
                res_name(s.final),
                (unsigned)s.dbg_lines, (unsigned)s.dbg_maxlen,
                (unsigned)s.dbg_ovf,    (unsigned)s.dbg_plus,

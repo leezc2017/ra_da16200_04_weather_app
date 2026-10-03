@@ -73,7 +73,38 @@ static struct {
 
     /* 命令归属 */
     cmd_owner_t cmd;
+
+    /* 心跳诊断(WEATHER_HB_DIAG_MS=0 时不打印) */
+    uint32_t hb_t0;
 } s;
+
+/* hal_entry.c 的诊断计数器(判断日志/数据是否被丢) */
+extern volatile uint32_t usb_tx_drop_cnt;
+extern volatile uint32_t wifi_rx_drop_cnt;
+extern volatile uint32_t wifi_rx_byte_cnt;
+
+/**
+ * @brief 低频心跳：确认主循环还活着、且引擎在收数据
+ *
+ * 定位"程序不动了"时非常有用：如果本行在刷新而 [WIFI] 不刷新，
+ * 说明是 WIFI 口没数据；连本行都不刷新，才是主循环真的卡住。
+ */
+static void hb_print (uint32_t now)
+{
+    at_engine_diag_t d;
+
+    at_engine_diag(&d);
+    printf("[hb] %lus eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
+           "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC\r\n",
+           (unsigned long)(now / 1000UL),
+           d.state, d.mode, d.urc_cnt, d.seen_cnt,
+           (unsigned long)d.rx_bytes, (unsigned long)d.lines,
+           (unsigned long)d.plus_lines,
+           (unsigned long)wifi_rx_byte_cnt, (unsigned long)wifi_rx_drop_cnt,
+           (unsigned long)usb_tx_drop_cnt,
+           (int)s.status,
+           s.wx_valid ? s.wx.text : "--", s.wx_valid ? s.wx.temperature : 0);
+}
 
 /* ===================== 内部工具 ===================== */
 
@@ -415,6 +446,7 @@ void weather_task_init (void)
     s.page       = 0U;
     s.ui_dirty   = true;
     s.cmd        = CMD_NONE;
+    s.hb_t0      = at_engine_now_ms();
 
     key_init();
     ui_init();
@@ -613,11 +645,19 @@ void weather_task_poll (void)
         }
     }
 
-    /* ---------- 5. 天气老化累加 ---------- */
+    /* ---------- 5. 天气老化累加 + 心跳 ---------- */
     if (s.wx_valid)
     {
         s.wx_age_ms += WEATHER_TICK_MS;
     }
+
+#if (WEATHER_HB_DIAG_MS > 0U)
+    if ((now - s.hb_t0) >= (uint32_t)WEATHER_HB_DIAG_MS)
+    {
+        s.hb_t0 = now;
+        hb_print(now);
+    }
+#endif
 
     /* ---------- 6. 重绘 ---------- */
     if (s.ui_dirty)
