@@ -41,33 +41,41 @@ typedef enum {
     CMD_TIME,          /**< AT+TIME */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
+    CMD_NWIP,          /**< AT+NWIP=?: 主动查当前 IP（判断模块是否已连上） */
     CMD_WFCAP,         /**< AT+WFCAP: 用 NVRAM 已存 profile 连接 */
-    CMD_WFJAPA,        /**< AT+WFJAPA: 连接并写入 NVRAM(WFCAP 回 ERROR:-7 时的回退) */
+    CMD_WFJAPA,        /**< AT+WFJAPA: 连接并写入 NVRAM */
     CMD_HTTP           /**< AT+NWHTC (weather_http_get_start) */
 } cmd_owner_t;
 
 /**
- * @brief 联网手段阶梯（2026-10-03 实测确定）
+ * @brief 联网手段阶梯（2026-10-03 实测 + 修正）
  *
- * 模块**不会**自连。日志实测：
- *   上电 -> 开机 AT 自检 OK（模块活着）
- *        -> 等 30s 没有任何 +INIT:DONE / +WFJAP URC
- *        -> AT+WFCAP 回 ERROR:-7
+ * ⚠ 修正过一次错误结论。初版以为"模块不自连，因为 ERROR:-7 = NVRAM 无 profile"，
+ *   但用户指出**之前确实拉到了天气**，且那次 `+WFJAP:1` 是开机自发出现的 ——
+ *   说明 profile 是有的、模块是会自连的。
  *
- * ERROR:-7 = **NVRAM 里没有 WiFi profile**，因此"被动等自发 +WFJAP"永远等不到，
- * 必须自己发起连接。所以顺序是：
- *   1. 被动等 +WFJAP        —— 兼容 profile 已存在、模块自己会连的情况
- *   2. AT+WFCAP             —— 用 NVRAM 里已存的 profile（若有）
- *   3. AT+WFJAPA=<ssid>,<pwd> —— 无 profile 时连接并写入 NVRAM（阶段4 前唯一出路）
+ * 真实情况：`+WFJAP:1` 是**上电一次性 URC**。如果 DA16200 模块没跟着复位
+ * （只复位了 RA 板子），它在 RA 起来之前就已经把这条 URC 发完了，
+ * RA 永远等不到。而此时模块其实**已经连着 AP**，只是 RA 不知道。
+ * `AT+WFCAP` 在"已连接"状态下报错，也容易被误读成"无 profile"。
  *
- * ⚠ 阶段2 直接用 weather_cfg.h 里硬编码的 SSID/PWD 走第 3 步；
- *   阶段4 配网完成后 profile 已存，第 1/2 步就会命中，WFJAPA 只作兜底。
+ * 所以阶梯的第一原则是**主动查询**，而不是被动等一次性 URC：
+ *   0. NWIP_QUERY —— AT+NWIP=? 直接问"你现在的 IP 是多少"。
+ *                   模块已连上就直接拿到 IP 收工，这是最快的路径，
+ *                   也免疫 URC 错过的问题。回 ERROR/-1 表示没连上，再往下走。
+ *   1. WAIT_URC   —— 短等 +WFJAP:1：兼容"RA 先起、模块后起"的冷启动顺序。
+ *   2. WFCAP      —— 让模块用 NVRAM 里已存的 profile 连。
+ *   3. WFJAPA     —— 显式带 SSID/PWD 连（并写 NVRAM），最兜底的手段。
+ *
+ * 阶段2 直接用 weather_cfg.h 里硬编码的 SSID/PWD 走第 3 步；
+ * 阶段4 配网完成后 profile 已存，第 0/2 步就会命中。
  */
-#define WIFI_STEP_WAIT_URC  0   /**< 被动等 +WFJAP */
-#define WIFI_STEP_WFCAP     1   /**< 用 NVRAM profile 连 */
-#define WIFI_STEP_WFJAPA    2   /**< 连接并写 NVRAM */
+#define WIFI_STEP_NWIP_QUERY 0 /**< AT+NWIP=? 主动查 IP（最快路径） */
+#define WIFI_STEP_WAIT_URC   1 /**< 短等 +WFJAP:1 URC */
+#define WIFI_STEP_WFCAP      2 /**< 用 NVRAM profile 连 */
+#define WIFI_STEP_WFJAPA     3 /**< 显式带 SSID/PWD 连接并写 NVRAM */
 
-/** 最高阶梯连续失败这么多次后, 退回 WFCAP 重跑整条链 */
+/** 最高阶梯连续失败这么多次后, 退回到第一级重跑整条链 */
 #define WIFI_WFJAPA_MAX_TRY  3U
 
 /* ===================== 状态 ===================== */
@@ -136,6 +144,133 @@ static void hb_print (uint32_t now)
 }
 
 /* ===================== 内部工具 ===================== */
+
+/**
+ * @brief 把整个连接流程标记为已连上
+ *
+ * @param how 来源描述，仅用于日志
+ */
+static void mark_connected (const char * how)
+{
+    s.status   = WIFI_STAT_CONNECTED;
+    s.ui_dirty = true;
+    s.timezone_set = false;
+    s.sntp_done    = false;
+    s.wifi_try     = 0U;
+    /* 阶段2 硬编码 SSID 连的，与配置里的名字对齐即可；
+     * 阶段4 配网拿到真 SSID 后改为从配置/存储读。 */
+    snprintf(s.ssid, sizeof(s.ssid), "%s", WEATHER_DEFAULT_SSID);
+    printf("[wx] CONNECTED via %s, ip=%s\r\n", how, s.ip);
+}
+
+/**
+ * @brief 从一行文本里取出 IP 字段
+ *
+ * 兼容两种实测格式：
+ *   +WFJAP:1,'CMCC-xxxx',192.168.1.2   —— IP 在**最后**一个逗号后（SSID 带引号）
+ *   +NWIP:0,192.168.1.2,255.255.255.0,192.168.1.1 —— IP 在**第 2** 个字段
+ *
+ * 做法：跳过前导 '+'，按逗号切成字段；先找第一个"看起来像 IPv4"的字段，
+ * 找不到再退回"最后一个逗号后"。这样两种格式都不用分别写解析器。
+ *
+ * @param line 输入行（不含 CRLF）
+ * @param out  输出缓冲
+ * @param size 缓冲大小
+ * @return true=取到
+ */
+static bool parse_ip (const char * line, char * out, uint16_t size)
+{
+    const char * p = line;
+    uint8_t field = 0U;
+
+    if ((NULL == line) || (NULL == out) || (0U == size))
+    {
+        return false;
+    }
+
+    while ((*p != '\0') && (*p != '\r') && (*p != '\n'))
+    {
+        if ((',' == *p) || ('\'' == *p))
+        {
+            p++;
+            continue;
+        }
+
+        if (('0' <= *p) && (*p <= '9') && (0U == field))
+        {
+            /* 候选 IPv4 起点：必须形如 d.d.d.d */
+            const char * q = p;
+            uint8_t dots = 0U;
+            uint8_t digits = 0U;
+
+            while ((*q != '\0') && (*q != '\r') && (*q != '\n') &&
+                   (*q != ',') && (*q != '\''))
+            {
+                if (('0' <= *q) && (*q <= '9'))
+                {
+                    digits++;
+                }
+                else if ('.' == *q)
+                {
+                    if (0U == digits)
+                    {
+                        break;                 /* ".." 不是 IP */
+                    }
+                    dots++;
+                    digits = 0U;
+                }
+                else
+                {
+                    break;
+                }
+                q++;
+            }
+            if ((3U == dots) && (digits > 0U) && (('\0' == *q) || (',' == *q) ||
+                                                ('\'' == *q) || ('\r' == *q) ||
+                                                ('\n' == *q)))
+            {
+                uint16_t k = 0U;
+
+                while ((p < q) && (k < (uint16_t)(size - 1U)))
+                {
+                    out[k++] = *p++;
+                }
+                out[k] = '\0';
+                return true;
+            }
+        }
+
+        if (',' == *p)
+        {
+            field++;
+        }
+        p++;
+    }
+
+    /* 兜底: 取最后一个逗号之后的内容 */
+    {
+        const char * last = strrchr(line, ',');
+
+        if (NULL != last)
+        {
+            const char * q = last + 1;
+            uint16_t k = 0U;
+
+            while ((*q == ' ') || (*q == '\t'))
+            {
+                q++;
+            }
+            while ((*q != '\0') && (*q != ',') && (*q != '\'') &&
+                   (*q != '\r') && (*q != '\n') && (k < (uint16_t)(size - 1U)))
+            {
+                out[k++] = *q++;
+            }
+            out[k] = '\0';
+            return (0U != k);
+        }
+    }
+    return false;
+}
 
 /**
  * @brief 投递一条 AT 命令并登记归属
@@ -383,25 +518,44 @@ static void on_cmd_done (at_result_t r)
                              (WEATHER_TIME_POLL_MS);
             break;
 
-        case CMD_WFCAP:
-            printf("[wx] WFCAP %s (err=%d)\r\n",
-                   (AT_RES_OK == r) ? "accepted" : "failed",
+        case CMD_NWIP:
+            /* 结果不在这判: +NWIP:0,<ip>,<mask>,<gw> 以 '+' 开头会被 line_done()
+             * 收进 URC FIFO, 由 poll 第 2b 步统一消费。这里只记日志。 */
+            printf("[wx] NWIP query %s (err=%d); waiting +NWIP / +WFJAP\r\n",
+                   (AT_RES_OK == r) ? "OK" : "failed",
                    at_engine_resp()->err_code);
-            s.status = WIFI_STAT_CONNECTING;       /* 回到等待 URC */
-            if (AT_RES_OK != r)
-            {
-                /* ERROR:-7 = NVRAM 无 profile, 必须自己发起并写入 profile。
-                 * 立刻升到最高阶梯, 不再空等下一个 30s 周期。 */
-                s.wifi_step = WIFI_STEP_WFJAPA;
-                s.connect_t0 = at_engine_now_ms();
-            }
+            s.status = WIFI_STAT_CONNECTING;
             break;
 
-        case CMD_WFJAPA:
-            printf("[wx] WFJAPA %s (err=%d); waiting +WFJAP URC\r\n",
+        case CMD_WFCAP:
+            /* ⚠ 不要再把 ERROR:-7 直接当成"无 profile"：只复位 RA 板子时模块往往
+             * **已经连着**，这条错误只是"没必要再连"，profile 其实还在 NVRAM。
+             * 真实是否已连上由阶梯第一级的 AT+NWIP=? 回读决定。 */
+            printf("[wx] WFCAP %s (err=%d); waiting +WFJAP / +NWIP\r\n",
                    (AT_RES_OK == r) ? "accepted" : "failed",
                    at_engine_resp()->err_code);
             s.status = WIFI_STAT_CONNECTING;
+            break;
+
+        case CMD_WFJAPA:
+            printf("[wx] WFJAPA %s (err=%d); waiting +WFJAP / +NWIP\r\n",
+                   (AT_RES_OK == r) ? "accepted" : "failed",
+                   at_engine_resp()->err_code);
+            s.status = WIFI_STAT_CONNECTING;
+            /* 失败计数放在这里而不是 poll 里: on_cmd_done 每条命令只跑一次，
+             * 若在 poll 里按 tick 自增, 10ms 一跳几秒就误判"用尽"。 */
+            if (AT_RES_OK != r)
+            {
+                s.wifi_try++;
+                if (s.wifi_try >= WIFI_WFJAPA_MAX_TRY)
+                {
+                    printf("[wx] WFJAPA failed %u times, restart ladder from NWIP query\r\n",
+                           (unsigned)s.wifi_try);
+                    s.wifi_try   = 0U;
+                    s.wifi_step  = WIFI_STEP_NWIP_QUERY;
+                    s.connect_t0 = at_engine_now_ms();
+                }
+            }
             break;
 
         default:
@@ -486,7 +640,7 @@ void weather_task_init (void)
     memset(&s, 0, sizeof(s));
     s.status     = WIFI_STAT_CONNECTING;
     s.connect_t0 = at_engine_now_ms();
-    s.wifi_step  = WIFI_STEP_WAIT_URC;     /* 先被动等, 失败沿阶梯升级 */
+    s.wifi_step  = WIFI_STEP_NWIP_QUERY;  /* 先主动查 IP, 再考虑被动等/主动连 */
     s.wifi_try   = 0U;
     s.page       = 0U;
     s.ui_dirty   = true;
@@ -560,49 +714,34 @@ void weather_task_poll (void)
         }
     }
 
-    /* 联网成功处理：等 +WFJAP URC 并解析 IP */
+    /* ---------- 2. 联网：URC 快速路径 + 超时阶梯 ---------- */
     if ((WIFI_STAT_CONNECTING == s.status) || (WIFI_STAT_IDLE == s.status))
     {
         char urc[AT_URC_LINE];
 
+        /* 2a. 快速路径：+WFJAP:1 自带 IP，一步到位（模块刚上电时会自发这条） */
         if (at_engine_urc_get("+WFJAP:1", urc, sizeof(urc)))
         {
-            printf("[wx] +WFJAP:1 -> CONNECTED, urc='%s'\r\n", urc);
-
-            /* 从 URC 行解析 IP：格式 +WFJAP:1,'SSID',IP
-               实测的 +WFJAP:1,'CMCC-xxxx',192.168.1.2 使用单引号包裹 SSID、
-               IP 不带引号。取最后一个逗号后的部分。 */
-            const char *comma = strrchr(urc, ',');
-            if (NULL != comma)
+            printf("[wx] +WFJAP:1 urc='%s'\r\n", urc);
+            if (parse_ip(urc, s.ip, sizeof(s.ip)))
             {
-                const char *p = comma + 1;
-                uint16_t k = 0U;
-
-                while (*p == ' ' || *p == '\t')
-                {
-                    p++;
-                }
-                while ((*p != '\0') && (*p != ',') && (*p != '\r') && (*p != '\n'))
-                {
-                    if (k < (uint16_t)(sizeof(s.ip) - 1U))
-                    {
-                        s.ip[k] = *p;
-                    }
-                    p++;
-                    k++;
-                }
-                s.ip[k] = '\0';
-                printf("[wx] ip from URC: %s\r\n", s.ip);
+                mark_connected("+WFJAP:1 URC");
             }
-
-            snprintf(s.ssid, sizeof(s.ssid), "%s", WEATHER_DEFAULT_SSID);
-            s.status   = WIFI_STAT_CONNECTED;
-            s.ui_dirty = true;
-            s.timezone_set = false;
-            s.sntp_done = false;
-            s.wifi_try  = 0U;
-            /* 阶段2 硬编码 SSID 连的, 与配置里的名字对齐即可;
-             * 阶段4 配网拿到真 SSID 后改为从配置/存储读。 */
+            else
+            {
+                printf("[wx] +WFJAP:1 has no IP field, fall back to NWIP query\r\n");
+                s.wifi_step  = WIFI_STEP_NWIP_QUERY;
+                s.connect_t0 = now;
+            }
+        }
+        /* 2b. +NWIP 回读：模块已连上但 URC 被错过时走这里 */
+        else if (at_engine_urc_get("+NWIP", urc, sizeof(urc)))
+        {
+            printf("[wx] +NWIP urc='%s'\r\n", urc);
+            if (parse_ip(urc, s.ip, sizeof(s.ip)))
+            {
+                mark_connected("+NWIP query");
+            }
         }
         else if (at_engine_urc_take("+WFJAP:0"))
         {
@@ -616,41 +755,38 @@ void weather_task_poll (void)
         {
             char cmd[96];
 
-            printf("[wx] no +WFJAP in %lums, step=%u try=%u\r\n",
+            printf("[wx] step %u idle %lums (try=%u), escalating\r\n",
+                   (unsigned)s.wifi_step,
                    (unsigned long)(now - s.connect_t0),
-                   (unsigned)s.wifi_step, (unsigned)s.wifi_try);
+                   (unsigned)s.wifi_try);
             s.connect_t0 = now;
 
-            if (WIFI_STEP_WAIT_URC == s.wifi_step)
+            switch (s.wifi_step)
             {
-                /* 被动等不到 -> 升一级用 NVRAM profile 连 */
-                s.wifi_step = WIFI_STEP_WFCAP;
-                s.wifi_try  = 0U;
-                (void)at_send_owned("AT+WFCAP", 3000U, CMD_WFCAP);
-            }
-            else if (WIFI_STEP_WFCAP == s.wifi_step)
-            {
-                /* WFCAP 也不行 -> 直接带 SSID/PWD 连并写 NVRAM */
-                s.wifi_step = WIFI_STEP_WFJAPA;
-                s.wifi_try  = 0U;
-                snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
-                         WEATHER_DEFAULT_SSID, WEATHER_DEFAULT_PWD);
-                (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
-            }
-            else
-            {
-                /* 已在最高阶梯: 退避重试, 避免 30s 一轮把串口刷满 */
-                s.wifi_try++;
-                if (s.wifi_try >= WIFI_WFJAPA_MAX_TRY)
-                {
+                case WIFI_STEP_NWIP_QUERY:
+                    /* 主动问 IP：模块若已连上这一步就收工，且免疫 URC 错过 */
+                    (void)at_send_owned("AT+NWIP=?", 2500U, CMD_NWIP);
+                    s.wifi_step = WIFI_STEP_WAIT_URC;
+                    break;
+
+                case WIFI_STEP_WAIT_URC:
+                    /* 等不到 URC -> 让模块用 NVRAM profile 自己连 */
+                    (void)at_send_owned("AT+WFCAP", 3000U, CMD_WFCAP);
+                    s.wifi_step = WIFI_STEP_WFCAP;
+                    break;
+
+                case WIFI_STEP_WFCAP:
+                default:
+                    /* 显式带 SSID/PWD：连 + 写 NVRAM，最兜底 */
+                    snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
+                             WEATHER_DEFAULT_SSID, WEATHER_DEFAULT_PWD);
+                    (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
+                    s.wifi_step = WIFI_STEP_WFJAPA;
                     s.wifi_try  = 0U;
-                    s.wifi_step = WIFI_STEP_WFCAP;   /* 回到中间阶梯重试整条链 */
-                }
-                snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
-                         WEATHER_DEFAULT_SSID, WEATHER_DEFAULT_PWD);
-                (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
+                    break;
             }
         }
+
     }
 
     /* ---------- 3. 引擎轮询（工程内唯一调用点, §4 单飞行） ---------- */
