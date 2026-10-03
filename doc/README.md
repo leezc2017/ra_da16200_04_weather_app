@@ -178,33 +178,33 @@ Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop
 
 ```
 [wx] task init
-[AT>] AT                          <- CMD_AT 自检, 2000ms 超时
+[AT>] AT                          <- CMD_AT 自检, 2000ms
 [wx] AT self-test sent
 [WIFI] OK
 [wx] AT self-test: OK, module is alive
-[wx] no +WFJAP in 8000ms, step=0 try=0     <- 模块不自连, 升一级
-[AT>] AT+WFCAP
-[WIFI] ERROR:-7                            <- NVRAM 无 profile
-[wx] WFCAP failed (err=-7)
-[AT>] AT+WFJAPA=CMCC-xxxx,<PASSWORD>         <- 自己发起, 既连又写 NVRAM
+[wx] step 0 idle 8000ms (try=0), escalating
+[AT>] AT+NWIP=?                   <- 主动查 IP：模块已连上就直接收工
+[WIFI] +NWIP:0,192.168.1.2,255.255.255.0,192.168.1.1
 [WIFI] OK
-[WIFI] +WFJAP:1,'CMCC-xxxx',192.168.1.2
-[wx] +WFJAP:1 -> CONNECTED, urc='+WFJAP:1,...'
-[wx] ip from URC: 192.168.1.2     <- IP 直接从 URC 解析, 不发 AT+NWIP=?
+[wx] +NWIP urc='+NWIP:0,192.168.1.2,...'
+[wx] CONNECTED via +NWIP query, ip=192.168.1.2
 ```
 
 要点：
 
-- 自检**失败不致命**，只打印 `TIMEOUT`/`ERROR` 后继续走阶梯（模块冷启动可能慢）。
-- **模块不会自连**（实测）：上电连 `+INIT:DONE` 都没有，`AT+WFCAP` 回 `ERROR:-7`
-  = NVRAM 里没有 WiFi profile。所以被动等 `+WFJAP` 只是兼容 profile 已存在的快路径，
-  必须有 `AT+WFCAP` → `AT+WFJAPA=<ssid>,<pwd>` 两级主动兜底，否则会永久卡在等 URC。
-- 每一级超时 `WEATHER_CONNECT_TIMEOUT_MS`（8s，从 30s 降下来：模块不自连时
-  被动等待是纯浪费）。`AT+WFJAPA` 超时给 30s，因为要等 AP 握手。
-- `WFCAP` 失败会**直接跳到最高级**，不再空等一个周期 —— `ERROR:-7` 不会自己好。
-- 连续失败 3 次（`WIFI_WFJAPA_MAX_TRY`）回退到 `WFCAP` 重跑整条链。
-- IP 从 `+WFJAP:1` URC 行取（`+WFJAP:1,'SSID',IP` → 最后一个逗号后），
-  **不要发 `AT+NWIP=?`**：该查询会因长响应丢字节而超时（DESIGN 风险#5）。
+- 自检**失败不致命**，打印 `TIMEOUT`/`ERROR` 后继续走阶梯。
+- **阶梯第一级是主动查询 `AT+NWIP=?`，不是被动等**。原因：`+WFJAP:1` 是模块上电时
+  发**一次**的 URC；只复位 RA 板子时它早就发完了，RA 永远等不到，而模块其实一直连着。
+  主动查询免疫这个问题。
+- 完整阶梯（每级 8s，`WEATHER_CONNECT_TIMEOUT_MS`）：
+  `AT+NWIP=?` → 短等 `+WFJAP:1`（覆盖 RA 先起的冷启动）→ `AT+WFCAP` →
+  `AT+WFJAPA=<ssid>,<pwd>`（30s，显式连 + 写 NVRAM）。
+- ⚠ `AT+WFCAP` 回 `ERROR:-7` **不等于"NVRAM 无 profile"**。模块已连上时它的语义是
+  "不必再连"。真实是否已连上由第一级的 `AT+NWIP=?` 回读判定。
+- `WFJAPA` 连续失败 3 次（`WIFI_WFJAPA_MAX_TRY`）回退到第一级重跑整条链。
+  计数放在 `on_cmd_done()` 里 —— 放 poll 里会每 10ms tick 自增，几秒就误判用尽。
+- IP 解析统一走 `parse_ip()`：找第一个形如 `d.d.d.d` 的字段，
+  `+WFJAP:1,'ssid',1.2.3.4` 和 `+NWIP:0,1.2.3.4,mask,gw` 两种格式共用一套代码。
 
 ## 4. 使用方法
 
