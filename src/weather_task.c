@@ -131,8 +131,17 @@ static void hb_print (uint32_t now)
     at_engine_diag_t d;
 
     at_engine_diag(&d);
+    /* ⚠ link= 这一段是"链路初始化进度"，排查"为什么没去拉天气"时最有用：
+     *   tz/sntp/wx 三个 bit 依次点亮，cmd 是当前在途命令归属。
+     *   三个 bit 全 0 且 cmd=AT(1)  -> 卡在开机自检
+     *   tz=0 且 cmd=0              -> 卡在等 TZONE 发出（引擎不空闲）
+     *   tz=1 sntp=0                -> 卡在等 SNTP
+     *   tz=1 sntp=1 wx=0           -> 正在拉第一次天气
+     *   wx=1                       -> 天气已就位，之后进入 15min 定时刷新
+     * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）。 */
     printf("[hb] %lus eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
-           "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC\r\n",
+           "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
+           "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
            (unsigned long)(now / 1000UL),
            d.state, d.mode, d.urc_cnt, d.seen_cnt,
            (unsigned long)d.rx_bytes, (unsigned long)d.lines,
@@ -140,7 +149,14 @@ static void hb_print (uint32_t now)
            (unsigned long)wifi_rx_byte_cnt, (unsigned long)wifi_rx_drop_cnt,
            (unsigned long)usb_tx_drop_cnt,
            (int)s.status,
-           s.wx_valid ? s.wx.text : "--", s.wx_valid ? s.wx.temperature : 0);
+           s.wx_valid ? s.wx.text : "--", s.wx_valid ? s.wx.temperature : 0,
+           (unsigned)(s.timezone_set ? 1U : 0U),
+           (unsigned)(s.sntp_done    ? 1U : 0U),
+           (unsigned)(s.wx_valid     ? 1U : 0U),
+           (unsigned)s.cmd,
+           (unsigned)s.wifi_step,
+           (unsigned)s.wifi_try,
+           (unsigned)weather_http_busy());
 }
 
 /* ===================== 内部工具 ===================== */
