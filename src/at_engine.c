@@ -155,6 +155,55 @@ bool at_engine_urc_seen(const char * prefix)
     return false;
 }
 
+/**
+ * @brief 匹配并消费一条 URC，同时把行内容拷贝出来
+ *
+ * 遍历 URC FIFO，找到第一个匹配 prefix 的槽，把该行拷贝到 out，
+ * 然后像 take() 一样把该槽移除。返回行内容；未找到或缓冲太小则返回 false。
+ */
+bool at_engine_urc_get(const char * prefix, char * out, uint16_t out_size)
+{
+    size_t plen = strlen(prefix);
+    uint8_t i;
+
+    if ((NULL == prefix) || (NULL == out) || (0U == out_size))
+    {
+        return false;
+    }
+
+    for (i = 0; i < s.urc_cnt; i++)
+    {
+        uint8_t idx = (uint8_t)((s.urc_head + i) % AT_URC_FIFO);
+
+        if (0 == strncmp(s.urc[idx], prefix, plen))
+        {
+            size_t n = strlen(s.urc[idx]);
+
+            if (n >= out_size)
+            {
+                n = out_size - 1U;
+            }
+            memcpy(out, s.urc[idx], n);
+            out[n] = '\0';
+
+            /* 移除该槽（同 take） */
+            {
+                uint8_t j;
+                for (j = i; j + 1U < s.urc_cnt; j++)
+                {
+                    uint8_t to = (uint8_t)((s.urc_head + j) % AT_URC_FIFO);
+                    uint8_t with = (uint8_t)((s.urc_head + j + 1U) % AT_URC_FIFO);
+                    memcpy(s.urc[to], s.urc[with], AT_URC_LINE);
+                }
+                s.urc_cnt--;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void at_engine_urc_seen_clear(void)
 {
     s.seen_cnt = 0;

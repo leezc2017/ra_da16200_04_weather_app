@@ -38,7 +38,6 @@
 typedef enum {
     CMD_NONE = 0,      /**< 无命令在途 */
     CMD_TIME,          /**< AT+TIME */
-    CMD_IP,            /**< AT+NWIP=? */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
     CMD_WFCAP          /**< AT+WFCAP 兜底重连 */
@@ -193,56 +192,6 @@ static bool take_time (char * time5, uint16_t size, char * date11)
 }
 
 /**
- * @brief 在引擎响应里找 +NWIP:0,<ip>,... 取 IP
- * @param buf  输出 IP
- * @param size 大小
- * @return true=取到
- */
-static bool take_ip (char * buf, uint16_t size)
-{
-    const char * b = at_engine_resp()->buf;
-    uint16_t n = at_engine_resp()->len;
-    uint16_t i;
-
-    for (i = 0U; (i + 6U) < n; i++)
-    {
-        if (0 == strncmp(&b[i], "+NWIP:", 6))
-        {
-            const char * p = &b[i + 6];
-            uint16_t k = 0U;
-
-            /* 跳过 mode 字段("0")与逗号 */
-            while ((*p != '\0') && (*p != ',') && (k < 2U))
-            {
-                p++;
-            }
-            if (',' == *p)
-            {
-                p++;
-            }
-            while ((p[k] != '\0') && (p[k] != ',') && (p[k] != '\r') && (p[k] != '\n'))
-            {
-                if (k < (uint16_t)(size - 1U))
-                {
-                    buf[k] = p[k];
-                }
-                k++;
-            }
-            if (k > 0U)
-            {
-                if (k >= size)
-                {
-                    k = (uint16_t)(size - 1U);
-                }
-                buf[k] = '\0';
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-/**
  * @brief 构造心知天气 now.json 的完整 URL
  *
  * 实测：裸 URL 即可，`&` `?` 都不需转义或加单引号。
@@ -344,14 +293,6 @@ static void on_cmd_done (at_result_t r)
             else
             {
                 printf("[wx] AT+TIME failed r=%d\r\n", (int)r);
-            }
-            break;
-
-        case CMD_IP:
-            if (take_ip(s.ip, sizeof(s.ip)))
-            {
-                printf("[wx] ip %s\r\n", s.ip);
-                s.ui_dirty = true;
             }
             break;
 
@@ -518,17 +459,46 @@ void weather_task_poll (void)
         }
     }
 
-    /* ---------- 2. 联网状态：靠 URC 判定，不发命令 ---------- */
-    if (WIFI_STAT_CONNECTING == s.status)
+    /* 联网成功处理：等 +WFJAP URC 并解析 IP */
+    if ((WIFI_STAT_CONNECTING == s.status) || (WIFI_STAT_IDLE == s.status))
     {
-        if (at_engine_urc_take("+WFJAP:1"))
+        char urc[AT_URC_LINE];
+
+        if (at_engine_urc_get("+WFJAP:1", urc, sizeof(urc)))
         {
-            printf("[wx] +WFJAP:1 -> CONNECTED after %lums\r\n",
-                   (unsigned long)(now - s.connect_t0));
+            printf("[wx] +WFJAP:1 -> CONNECTED, urc='%s'\r\n", urc);
+
+            /* 从 URC 行解析 IP：格式 +WFJAP:1,'SSID',IP
+               实测的 +WFJAP:1,'CMCC-xxxx',192.168.1.2 使用单引号包裹 SSID、
+               IP 不带引号。取最后一个逗号后的部分。 */
+            const char *comma = strrchr(urc, ',');
+            if (NULL != comma)
+            {
+                const char *p = comma + 1;
+                uint16_t k = 0U;
+
+                while (*p == ' ' || *p == '\t')
+                {
+                    p++;
+                }
+                while ((*p != '\0') && (*p != ',') && (*p != '\r') && (*p != '\n'))
+                {
+                    if (k < (uint16_t)(sizeof(s.ip) - 1U))
+                    {
+                        s.ip[k] = *p;
+                    }
+                    p++;
+                    k++;
+                }
+                s.ip[k] = '\0';
+                printf("[wx] ip from URC: %s\r\n", s.ip);
+            }
+
             snprintf(s.ssid, sizeof(s.ssid), "%s", WEATHER_DEFAULT_SSID);
             s.status   = WIFI_STAT_CONNECTED;
             s.ui_dirty = true;
-            (void)at_send_owned("AT+NWIP=?", 2500U, CMD_IP);
+            s.timezone_set = false;
+            s.sntp_done = false;
         }
         else if (at_engine_urc_take("+WFJAP:0"))
         {
@@ -537,7 +507,8 @@ void weather_task_poll (void)
             s.fails++;
             s.ui_dirty = true;
         }
-        else if ((now - s.connect_t0) >= WEATHER_CONNECT_TIMEOUT_MS)
+        else if ((WIFI_STAT_CONNECTING == s.status) &&
+                 ((now - s.connect_t0) >= WEATHER_CONNECT_TIMEOUT_MS))
         {
             printf("[wx] no +WFJAP in %lums, fallback AT+WFCAP\r\n",
                    (unsigned long)(now - s.connect_t0));

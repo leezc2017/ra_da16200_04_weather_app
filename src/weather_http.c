@@ -79,25 +79,25 @@ static void split_http (const char * buf, uint16_t n,
     }
     /* 首行形如 "HTTP/1.1 200 OK" —— 从第一个空格后取数字 */
     {
-        uint16_t s = i;
+        uint16_t row_start = i;
 
         while ((i < n) && ('\r' != buf[i]) && ('\n' != buf[i]))
         {
             i++;
         }
-        while ((s < i) && (' ' != buf[s]))
+        while ((row_start < i) && (' ' != buf[row_start]))
         {
-            s++;
+            row_start++;
         }
-        s++;                                        /* 跳过空格 */
-        while ((s < i) && (' ' == buf[s]))
+        row_start++;                                    /* 跳过空格 */
+        while ((row_start < i) && (' ' == buf[row_start]))
         {
-            s++;
+            row_start++;
         }
-        while ((s < i) && (buf[s] >= '0') && (buf[s] <= '9'))
+        while ((row_start < i) && (buf[row_start] >= '0') && (buf[row_start] <= '9'))
         {
-            code = (code * 10) + (buf[s] - '0');
-            s++;
+            code = (code * 10) + (buf[row_start] - '0');
+            row_start++;
         }
     }
 

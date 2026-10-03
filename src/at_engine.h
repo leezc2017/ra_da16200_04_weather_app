@@ -67,4 +67,17 @@ bool             at_engine_urc_seen(const char * prefix);
 void             at_engine_urc_seen_clear(void);
 void             at_engine_urc_trace(bool on);          /* 每条 URC 打时间戳 */
 
+/**
+ * @brief 匹配并取出一条 URC（消费型，返回行内容）
+ *
+ *与at_engine_urc_take 的区别：take 只返回 bool、不给行内容。
+ *用于需要解析 URC 载荷的场景（如 +WFJAP:1,'ssid','ip' 里提取 IP）。
+ *
+ * @param prefix  匹配前缀（如 "+WFJAP:1"）
+ * @param out     输出缓冲
+ * @param out_size 缓冲大小
+ * @return true=找到并拷贝成功，false=未找到或缓冲太小
+ */
+bool             at_engine_urc_get(const char * prefix, char * out, uint16_t out_size);
+
 #endif /* AT_ENGINE_H */
