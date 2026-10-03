@@ -10,6 +10,7 @@
 #include "oled/oled_font.h"
 #include "weather_text.h"
 #include "weather_ui.h"
+#include "weather_task.h"
 
 #define TICK_MS          (10U)       /* 主循环节拍 */
 #define USB_TX_RING_SIZE  (4096U)     /* USB TX 环形缓冲: printf 入队, 主循环泵发, 不阻塞 */
@@ -583,7 +584,8 @@ void hal_entry(void)
     printf("Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop\r\n");
 
     at_engine_init();
-    charset_selftest();                       /* 字符集 + OLED 链路自检 */
+    oled_port_init();
+    weather_task_init();                      /* 阶段2: 天气主状态机 */
 
     while (1)
     {
@@ -593,8 +595,19 @@ void hal_entry(void)
         usb_tx_pump();                       /* 泵发 USB TX 环(非阻塞打印的兑现点) */
 
         at_engine_tick(TICK_MS);             /* 引擎时基 */
-        (void)at_engine_poll();              /* 异步发送/超时推进 */
-        at_probe_poll();                     /* 诊断序列推进(空闲时速返) */
+
+        /* ⚠ 引擎轮询只有一个调用点（DESIGN §4 单飞行）：
+         * 诊断模式走 at_probe_poll（内部自己轮询引擎），
+         * 正常模式走 weather_task_poll（内部自己轮询引擎）。
+         * 二者互斥，由 at_probe_running() 判定，绝不能同时轮询。 */
+        if (at_probe_running())
+        {
+            at_probe_poll();                 /* AUTO / AUTOB 诊断中 */
+        }
+        else
+        {
+            weather_task_poll();             /* 正常天气状态机 */
+        }
 
         R_BSP_SoftwareDelay(TICK_MS, BSP_DELAY_UNITS_MILLISECONDS);
     }

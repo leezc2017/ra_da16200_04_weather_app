@@ -167,12 +167,53 @@ OLED_Set_Pos(x, y):  0xb0 + y     // y 是【页号 0~3】，不是像素纵坐�
 `oledfont.h` 的 `Hzk[]` 按 GB2312 顺序索引，故若要上中文需 `oled_utf8_to_gbk()` 转码。
 **一律用 weather code 查表**，不要拿 `now.text` 做 `strcmp`（编码不同必然失配）。
 
-### 阶段2：天气链路（串口输出版）
+### 阶段2：天气链路（串口输出版）← 当前进行中
 - 联网状态机（IDLE/CONNECTING/CONNECTED/FAIL，对齐 GD32 五态简化）
 - SNTP 对时 + 时间获取、心知天气 GET + cJSON 解析 + code→文案
 - 15 分钟定时刷新、按键单击触发刷新
 - **at_engine 切全异步 + 按键事件 FIFO**（§4 硬性要求），验证连接中/失败中按键立即响应（§8.1 根因2 的修复点）
 - **验收**：串口每 15 分钟打印一行天气（时间/温度/文案），单击立即刷新；**连接失败阻塞期间长按/单击 10/10 次即时响应**
+
+#### 阶段2 设计要点（2026-10-03 定稿）
+
+**与 GD32 版的任务结构差异**
+
+| 项 | GD32 版 | RA 版 |
+|---|---|---|
+| 调度 | FreeRTOS 任务 + `sys_ms_sleep` | **裸机 10ms tick**，挂在 `hal_entry` 主循环 |
+| 联网 | `wifi_prov_start()` 阻塞 | **被动等 `+WFJAP:1` URC**（实测上电自发，§5） |
+| SNTP | lwip `sntp_start_once()` + 时间钩子 | `AT+NWSNTP=1,<server>,86400`；读时用 `AT+TIME` |
+| 时间源 | 内部 `s_epoch_base` + `sys_time_get()` | **每分钟查一次 `AT+TIME`**（DA16200 持有 RTC） |
+| HTTP | `weather_http_get()` 裸 socket | `AT+NWHTC=<url>,get` **PAYLOAD 模式** |
+| 按键 | `key_scan.c` 读 GD32 GPIO | 移植逻辑，GPIO 读法换成 `R_IOPORT_PinRead` |
+
+**新增模块**
+
+| 文件 | 职责 |
+|---|---|
+| `src/weather_task.c/.h` | 主状态机（裸机，非阻塞）。每 tick 调用 `weather_task_poll()` |
+| `src/weather_http.c/.h` | NWHTC PAYLOAD 模式封装：发命令→等 `+NWHTCSTATUS`→切 `\r\n\r\n`→交出 body |
+| `src/key_scan.c/.h` | 移植 GD32 三态逻辑（short/double/long），GPIO 换 `R_IOPORT_PinRead` |
+| `src/cJSON.c/.h` | MIT 许可，从 GD32 SDK 拷贝（`MSDK/util/`） |
+
+**⚠ 与 GD32 版的三个关键差异（踩过坑）**
+
+1. **时间不能本地算** —— GD32 有 `s_epoch_base` + `gmtime()`，RA 没有 RTC，
+   只能查 `AT+TIME`（每分钟 1 次，`AT+TIME` 已在实测中确认存在）。
+   未同步时显示 `--:--`。
+2. **命令串不能超 `AT_CMD_MAX`(180)** —— 心知 URL 含 key 实测 113 字节，
+   加上 `AT+NWHTC=` 和 `,get` 仍在限内，但**若加引号/加长参数会溢出**，
+   故 `weather_http` 内部用 256 字节缓冲并在 `at_engine_start` 处做长度校验。
+3. **NWHTC 期间不能发别的命令** —— 单飞行约束（§4）。
+   所以时间查询必须排在天气请求**之后**，不能并行。
+
+**按键映射（阶段2 只接 1 个机械键，触摸键留阶段3）**
+
+| 事件 | 功能 |
+|---|---|
+| 短按 | 立即刷新天气 |
+| 双击 | 翻页（主页 ⇄ WiFi 信息页） |
+| 长按 3s | 进入/退出配网（阶段4 实现） |
 
 ### 阶段3：OLED + 按键（4 键全接入）
 - 复用 `RA4M2OLED` 示例的 oled/oled_port/gpio_spi（运行时配引脚，**无需 FSP 配置器操作**），移植 GD32 `weather_ui.c` 4 页面
