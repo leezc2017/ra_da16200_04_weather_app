@@ -57,8 +57,10 @@
 #define WEATHER_TICK_MS          10U
 /* 时间查询周期(ms): RA 无 RTC, 主页时钟靠查 DA16200 的 AT+TIME */
 #define WEATHER_TIME_POLL_MS     60000U
-/* 联网判定超时: 超过此时长没收到 +WFJAP 则兜底发 AT+WFCAP */
-#define WEATHER_CONNECT_TIMEOUT_MS  30000U
+/* 每一级联网阶梯的超时(ms): 超过此时长没收到 +WFJAP 就升/退一级重试。
+ * 2026-10-03 实测：模块**不会**自连(无 profile 时连 +INIT:DONE 都没有)，
+ * 所以第一级等满 30s 是纯浪费，改成 8s 尽快升到 AT+WFCAP / AT+WFJAPA。 */
+#define WEATHER_CONNECT_TIMEOUT_MS  8000U
 /* 下发 SNTP 后等对时生效的时间, 期间提前查一次 AT+TIME 验证 */
 #define SNTP_SETTLE_MS           8000U
 

@@ -41,9 +41,34 @@ typedef enum {
     CMD_TIME,          /**< AT+TIME */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
-    CMD_WFCAP,         /**< AT+WFCAP 兜底重连 */
+    CMD_WFCAP,         /**< AT+WFCAP: 用 NVRAM 已存 profile 连接 */
+    CMD_WFJAPA,        /**< AT+WFJAPA: 连接并写入 NVRAM(WFCAP 回 ERROR:-7 时的回退) */
     CMD_HTTP           /**< AT+NWHTC (weather_http_get_start) */
 } cmd_owner_t;
+
+/**
+ * @brief 联网手段阶梯（2026-10-03 实测确定）
+ *
+ * 模块**不会**自连。日志实测：
+ *   上电 -> 开机 AT 自检 OK（模块活着）
+ *        -> 等 30s 没有任何 +INIT:DONE / +WFJAP URC
+ *        -> AT+WFCAP 回 ERROR:-7
+ *
+ * ERROR:-7 = **NVRAM 里没有 WiFi profile**，因此"被动等自发 +WFJAP"永远等不到，
+ * 必须自己发起连接。所以顺序是：
+ *   1. 被动等 +WFJAP        —— 兼容 profile 已存在、模块自己会连的情况
+ *   2. AT+WFCAP             —— 用 NVRAM 里已存的 profile（若有）
+ *   3. AT+WFJAPA=<ssid>,<pwd> —— 无 profile 时连接并写入 NVRAM（阶段4 前唯一出路）
+ *
+ * ⚠ 阶段2 直接用 weather_cfg.h 里硬编码的 SSID/PWD 走第 3 步；
+ *   阶段4 配网完成后 profile 已存，第 1/2 步就会命中，WFJAPA 只作兜底。
+ */
+#define WIFI_STEP_WAIT_URC  0   /**< 被动等 +WFJAP */
+#define WIFI_STEP_WFCAP     1   /**< 用 NVRAM profile 连 */
+#define WIFI_STEP_WFJAPA    2   /**< 连接并写 NVRAM */
+
+/** 最高阶梯连续失败这么多次后, 退回 WFCAP 重跑整条链 */
+#define WIFI_WFJAPA_MAX_TRY  3U
 
 /* ===================== 状态 ===================== */
 
@@ -73,6 +98,10 @@ static struct {
 
     /* 命令归属 */
     cmd_owner_t cmd;
+
+    /* 联网阶梯(见 WIFI_STEP_* 注释) */
+    uint8_t  wifi_step;
+    uint8_t  wifi_try;            /**< 当前阶梯已尝试次数, 用于退避 */
 
     /* 心跳诊断(WEATHER_HB_DIAG_MS=0 时不打印) */
     uint32_t hb_t0;
@@ -355,10 +384,24 @@ static void on_cmd_done (at_result_t r)
             break;
 
         case CMD_WFCAP:
-            printf("[wx] WFCAP %s (err=%d); waiting +WFJAP URC\r\n",
-                   (AT_RES_OK == r) ? "accepted" : "no-profile",
+            printf("[wx] WFCAP %s (err=%d)\r\n",
+                   (AT_RES_OK == r) ? "accepted" : "failed",
                    at_engine_resp()->err_code);
             s.status = WIFI_STAT_CONNECTING;       /* 回到等待 URC */
+            if (AT_RES_OK != r)
+            {
+                /* ERROR:-7 = NVRAM 无 profile, 必须自己发起并写入 profile。
+                 * 立刻升到最高阶梯, 不再空等下一个 30s 周期。 */
+                s.wifi_step = WIFI_STEP_WFJAPA;
+                s.connect_t0 = at_engine_now_ms();
+            }
+            break;
+
+        case CMD_WFJAPA:
+            printf("[wx] WFJAPA %s (err=%d); waiting +WFJAP URC\r\n",
+                   (AT_RES_OK == r) ? "accepted" : "failed",
+                   at_engine_resp()->err_code);
+            s.status = WIFI_STAT_CONNECTING;
             break;
 
         default:
@@ -441,8 +484,10 @@ static void ui_refresh (void)
 void weather_task_init (void)
 {
     memset(&s, 0, sizeof(s));
-    s.status     = WIFI_STAT_CONNECTING;    /* 上电等自发 +WFJAP */
+    s.status     = WIFI_STAT_CONNECTING;
     s.connect_t0 = at_engine_now_ms();
+    s.wifi_step  = WIFI_STEP_WAIT_URC;     /* 先被动等, 失败沿阶梯升级 */
+    s.wifi_try   = 0U;
     s.page       = 0U;
     s.ui_dirty   = true;
     s.cmd        = CMD_NONE;
@@ -555,6 +600,9 @@ void weather_task_poll (void)
             s.ui_dirty = true;
             s.timezone_set = false;
             s.sntp_done = false;
+            s.wifi_try  = 0U;
+            /* 阶段2 硬编码 SSID 连的, 与配置里的名字对齐即可;
+             * 阶段4 配网拿到真 SSID 后改为从配置/存储读。 */
         }
         else if (at_engine_urc_take("+WFJAP:0"))
         {
@@ -566,12 +614,41 @@ void weather_task_poll (void)
         else if ((WIFI_STAT_CONNECTING == s.status) &&
                  ((now - s.connect_t0) >= WEATHER_CONNECT_TIMEOUT_MS))
         {
-            printf("[wx] no +WFJAP in %lums, fallback AT+WFCAP\r\n",
-                   (unsigned long)(now - s.connect_t0));
+            char cmd[96];
+
+            printf("[wx] no +WFJAP in %lums, step=%u try=%u\r\n",
+                   (unsigned long)(now - s.connect_t0),
+                   (unsigned)s.wifi_step, (unsigned)s.wifi_try);
             s.connect_t0 = now;
-            if (!at_send_owned("AT+WFCAP", 3000U, CMD_WFCAP))
+
+            if (WIFI_STEP_WAIT_URC == s.wifi_step)
             {
-                printf("[wx] WFCAP busy, retry next tick\r\n");
+                /* 被动等不到 -> 升一级用 NVRAM profile 连 */
+                s.wifi_step = WIFI_STEP_WFCAP;
+                s.wifi_try  = 0U;
+                (void)at_send_owned("AT+WFCAP", 3000U, CMD_WFCAP);
+            }
+            else if (WIFI_STEP_WFCAP == s.wifi_step)
+            {
+                /* WFCAP 也不行 -> 直接带 SSID/PWD 连并写 NVRAM */
+                s.wifi_step = WIFI_STEP_WFJAPA;
+                s.wifi_try  = 0U;
+                snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
+                         WEATHER_DEFAULT_SSID, WEATHER_DEFAULT_PWD);
+                (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
+            }
+            else
+            {
+                /* 已在最高阶梯: 退避重试, 避免 30s 一轮把串口刷满 */
+                s.wifi_try++;
+                if (s.wifi_try >= WIFI_WFJAPA_MAX_TRY)
+                {
+                    s.wifi_try  = 0U;
+                    s.wifi_step = WIFI_STEP_WFCAP;   /* 回到中间阶梯重试整条链 */
+                }
+                snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
+                         WEATHER_DEFAULT_SSID, WEATHER_DEFAULT_PWD);
+                (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
             }
         }
     }
