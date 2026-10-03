@@ -37,6 +37,7 @@
 /** 命令归属：决定引擎结果交给谁处理 */
 typedef enum {
     CMD_NONE = 0,      /**< 无命令在途 */
+    CMD_AT,            /**< AT 自检: 启动时先验证模块响应 */
     CMD_TIME,          /**< AT+TIME */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
@@ -288,6 +289,13 @@ static void on_cmd_done (at_result_t r)
 
     switch (s.cmd)
     {
+        case CMD_AT:
+            printf("[wx] AT self-test: %s, module is %s\r\n",
+                   (AT_RES_OK == r) ? "OK" : ((AT_RES_TIMEOUT == r) ? "TIMEOUT" : "ERROR"),
+                   (AT_RES_OK == r) ? "alive" : "not responding");
+            /* 即便超时也继续尝试联网, 可能只是回复时序原因 */
+            break;
+
         case CMD_TIME:
             if (take_time(time5, sizeof(time5), date11))
             {
@@ -410,7 +418,17 @@ void weather_task_init (void)
 
     key_init();
     ui_init();
-    printf("[wx] task init: waiting spontaneous +WFJAP (no AT command needed)\r\n");
+    printf("[wx] task init\r\n");
+
+    /* 用户要求: 每次开机先用 AT 命令测试模块, 再走后续联网/天气 */
+    if (!at_send_owned("AT", 2000U, CMD_AT))
+    {
+        printf("[wx] AT self-test could not submit (engine busy)\r\n");
+    }
+    else
+    {
+        printf("[wx] AT self-test sent\r\n");
+    }
 }
 
 void weather_task_refresh_now (void)
