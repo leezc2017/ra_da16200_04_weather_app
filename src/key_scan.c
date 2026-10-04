@@ -168,6 +168,19 @@ void key_poll (uint32_t now_ms)
 
         /* 消抖确认电平翻转 */
         c->debounced = raw;
+        /* 每次稳定翻转都打印原始电平（40ms 消抖后，所以一次真实按下只打 2 行：
+         * 按下 1 行 + 释放 1 行，不会刷屏）。
+         * ⚠ 这行诊断很关键：2026-10-04 现象是 P005 有反应、P006 完全没反应，
+         *   而两者的 FSP 配置完全相同。若按 SW2 时这行**不出现**，
+         *   说明 SW2 根本没接在 P006 上（引脚假设错），而不是极性/消抖问题 ——
+         *   极性错了会看到 raw=0 与 normalized 反过来，但行仍会出现。 */
+        printf("[key] k%u %s: raw=%u (1=high) normalized=%u\r\n",
+               (unsigned)i,
+               raw ? "PRESSED" : "released",
+               (unsigned)((KEY_ID_MECH1 == (key_id_t)i) ?
+                          ((WEATHER_KEY_ACTIVE_LOW)  ? (uint8_t)!raw : raw) :
+                          ((WEATHER_KEY2_ACTIVE_LOW) ? (uint8_t)!raw : raw)),
+               (unsigned)raw);
         if (raw)                            /* 刚按下 */
         {
             c->press_start_ms = now_ms;
