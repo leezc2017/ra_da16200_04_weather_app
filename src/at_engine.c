@@ -557,6 +557,22 @@ at_result_t at_engine_poll(void)
      *   plus=0         -> 没收到任何 '+' 开头行, +NWHTCSTATUS 没进来
      *   plus>0 且 nw=-1 -> '+' 行有但 status 没解析出来
      *   ovfbuf=1       -> 4KB 响应缓冲溢出(正文被截) */
+    /* ⚠ 这条**不受 AT_ENG_TRACE 控制**，永远打印。
+     *
+     * 2026-10-04 排查"收到响应但不解析"卡了很久：日志窗口约 44 行，
+     * 而天气响应期间 [WIFI] 回显已关，所以这条收口信息是
+     * "first fetch issued" 之后的第一条可见输出，必须保证它一定出现。
+     * 它直接回答"引擎到底有没有把 NWHTC 命令收口、收到多少字节"。
+     */
+    if ((!was_idle) && (ST_IDLE == s.state) &&
+        (AT_RES_PENDING != s.final) && (AT_MODE_PAYLOAD == s.mode))
+    {
+        printf("[NWHTC] closed res=%s nw=%d rxlen=%u lines=%u plus=%u ovfbuf=%u\r\n",
+               res_name(s.final), s.resp.status, (unsigned)s.resp.len,
+               (unsigned)s.dbg_lines, (unsigned)s.dbg_plus,
+               s.resp.overflow ? 1U : 0U);
+    }
+
 #if (AT_ENG_TRACE > 0)
     if ((!was_idle) && (ST_IDLE == s.state) && (AT_RES_PENDING != s.final))
     {

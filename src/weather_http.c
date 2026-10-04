@@ -251,6 +251,12 @@ void weather_http_on_engine_done (at_result_t r)
 
     s.res.nw_status = at_engine_resp()->status;
 
+    /* ⚠ 永远打印（不受任何开关控制）：这是 weather_http 的入口诊断，
+     * 回答"引擎收口时到底带了多少字节进来"。NWHTC 期间 [WIFI] 回显已关，
+     * 所以它必然紧跟在 [NWHTC] closed 之后，是窗口内仅剩的两行输出。 */
+    printf("[wx] http done r=%s nw=%d rxlen=%u\r\n",
+           res_str(r), s.res.nw_status, (unsigned)at_engine_resp()->len);
+
     if (AT_RES_OK != r)
     {
         printf("[wx] http failed: %s nwstatus=%d err=%d\r\n",
