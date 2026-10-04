@@ -129,6 +129,69 @@ extern volatile uint32_t wifi_rx_byte_cnt;
  */
 static void hb_print (uint32_t now);
 
+/**
+ * @brief 最近一次天气抓取的结论（缓存，等价于 [WX-RESULT] 那一行）
+ *
+ * 为什么缓存（2026-10-04）：
+ *   [WX-RESULT] 是一次性打印，落在串口窗口外就再也拿不到，而心跳要等
+ *   5s、fetch 在途时才有 1s 心跳，都不可靠。缓存之后**无论窗口多小**，
+ *   心跳行里必然带着结论；OLED 也能直接显示，**完全不需要看日志**。
+ *
+ * 这样就不再需要"等多久再抓日志"这种提问 —— 结果是被动的、随时可读的。
+ */
+typedef enum {
+    WXR_NONE = 0,      /**< 还没拉过 */
+    WXR_OK,            /**< 解析成功 */
+    WXR_HTTP_ERR,      /**< HTTP 状态非 200 */
+    WXR_PARSE_ERR,     /**< 拿到 body 但 cJSON 解析失败 */
+    WXR_TRANSPORT_ERR  /**< 引擎超时/错误 */
+} wx_res_t;
+
+static struct {
+    wx_res_t kind;
+    int      http;                 /**< HTTP 状态码, -1 = 未取到 */
+    int      nw;                   /**< +NWHTCSTATUS 的 n, -1 = 未收到 */
+    uint16_t body_len;
+    int      temperature;
+    uint8_t  code;                 /**< 心知天气 code */
+    char     text[24];             /**< 英文文案(ASCII, 上屏用) */
+    char     api_text[40];         /**< API 原文(UTF-8, 仅供串口查看) */
+    uint32_t at_ms;                /**< 结论产生的引擎时刻 */
+} s_wxr;
+
+const char * weather_task_last_result (void)
+{
+    switch (s_wxr.kind)
+    {
+        case WXR_NONE:          return "no fetch yet";
+        case WXR_OK:            return "OK";
+        case WXR_HTTP_ERR:      return "HTTP ERR";
+        case WXR_PARSE_ERR:     return "PARSE ERR";
+        case WXR_TRANSPORT_ERR: return "TRANSPORT ERR";
+        default:                return "?";
+    }
+}
+
+const char * weather_task_last_text (void)
+{
+    return (s_wxr.text[0] != '\0') ? s_wxr.text : "--";
+}
+
+int weather_task_last_temp (void)
+{
+    return s_wxr.temperature;
+}
+
+/** 供 OLED 显示用：把最近结论拼成一行短文本（ASCII, 128x32 放得下） */
+void weather_task_result_line (char * buf, uint16_t size)
+{
+    snprintf(buf, size, "%s %dC", weather_task_last_result(), s_wxr.temperature);
+    if ((WXR_OK != s_wxr.kind) && (0 != s_wxr.nw))
+    {
+        snprintf(buf, size, "%s nw=%d", weather_task_last_result(), s_wxr.nw);
+    }
+}
+
 void weather_task_heartbeat_force (void)
 {
     hb_print(at_engine_now_ms());
@@ -152,7 +215,7 @@ static void hb_print (uint32_t now)
      * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）。 */
     printf("[hb] %lus eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
            "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
-           "kraw=%u%u "
+           "kraw=%u%u res=%s/%d "
            "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
            (unsigned long)(now / 1000UL),
            d.state, d.mode, d.urc_cnt, d.seen_cnt,
@@ -163,6 +226,7 @@ static void hb_print (uint32_t now)
            (int)s.status,
            s.wx_valid ? s.wx.text : "--", s.wx_valid ? s.wx.temperature : 0,
            (unsigned)k1, (unsigned)k2,
+           weather_task_last_result(), s_wxr.http,
            (unsigned)(s.timezone_set ? 1U : 0U),
            (unsigned)(s.sntp_done    ? 1U : 0U),
            (unsigned)(s.wx_valid     ? 1U : 0U),
@@ -495,13 +559,20 @@ static void fetch_weather_done (void)
 {
     const weather_http_result_t * res = weather_http_result();
 
+    s_wxr.at_ms    = at_engine_now_ms();
+    s_wxr.http     = res->http_status;
+    s_wxr.nw       = res->nw_status;
+    s_wxr.body_len = (res->len > 0) ? (uint16_t)res->len : 0U;
+
     /* 无论成败都打一行, 且行首统一 [WX-RESULT]。
      * 之前成功/失败用不同前缀([wx] OK: / [wx] fetch failed: / [wx] parse failed:),
      * 排查时无法用单一关键字把"这次拉取的结果"grep 出来, 容易误判成没走到。 */
     if ((res->len <= 0) || (res->http_status != 200))
     {
+        s_wxr.kind = (res->len <= 0) ? WXR_TRANSPORT_ERR : WXR_HTTP_ERR;
         printf("[WX-RESULT] FAIL http=%d nw=%d len=%d\r\n",
                res->http_status, res->nw_status, res->len);
+        s.ui_dirty = true;
         return;
     }
 
@@ -510,11 +581,20 @@ static void fetch_weather_done (void)
 
         if (0 != weather_parse_now(body, &s.wx))
         {
+            s_wxr.kind = WXR_PARSE_ERR;
             printf("[WX-RESULT] PARSE-FAIL http=200 nw=%d len=%d body=%.60s\r\n",
                    res->nw_status, res->len, body);
+            s.ui_dirty = true;
             return;
         }
     }
+
+    s_wxr.kind        = WXR_OK;
+    s_wxr.temperature = s.wx.temperature;
+    s_wxr.code        = (uint8_t)s.wx.code;
+    snprintf(s_wxr.text, sizeof(s_wxr.text), "%s",
+             weather_text_get(s.wx.code));
+    snprintf(s_wxr.api_text, sizeof(s_wxr.api_text), "%.16s", s.wx.text);
 
     s.wx_valid  = true;
     s.wx_age_ms = 0U;
@@ -700,9 +780,16 @@ static void ui_refresh (void)
         }
         else
         {
+            /* ⚠ 没拿到天气时**直接把失败原因显示在屏幕上**，不再只显示
+             * "waiting data.."（2026-10-04）。
+             *
+             * 之前 OLED 只说"等数据"，无法区分"还在等模块回包"、"HTTP 非 200"
+             * 和"cJSON 解析失败"三种完全不同的情况，只能靠翻串口日志 ——
+             * 而结论行偏偏容易落在串口窗口外。现在屏幕上直接给出结论，
+             * **看一眼屏幕就知道通没通，不需要抓日志、不需要掐时间**。 */
             if (s.status == WIFI_STAT_CONNECTED)
             {
-                snprintf(mv.wtext, sizeof(mv.wtext), "waiting data..");
+                weather_task_result_line(mv.wtext, sizeof(mv.wtext));
             }
             mv.icon = 0xFFU;
         }
@@ -741,8 +828,16 @@ void weather_task_init (void)
     printf("[wx] task init: boot %s %s, first step = NWIP query\r\n",
            __DATE__, __TIME__);
 
-    /* 用户要求: 每次开机先用 AT 命令测试模块, 再走后续联网/天气 */
-    if (!at_send_owned("AT", 2000U, CMD_AT))
+    /* 用户要求: 每次开机先用 AT 命令测试模块, 再走后续联网/天气。
+     *
+     * ⚠ 超时只给 800ms 而不是 2000ms（2026-10-04 调整）：
+     *   实测冷启动这条 AT 必定被截断（只回 1 个字符就 TIMEOUT），它只是
+     *   "模块活着没有"的形式确认。而引擎时钟是按主循环 tick 累加的，
+     *   OLED 重绘一轮要 ~100ms，所以 2000ms 的引擎时间在真实时间上远不止
+     *   2 秒，整轮开机白等 —— 之前"抓日志等不到结果"就有它一份。
+     *   自检失败不致命（下一条 AT+NWIP=? 才是真正判定），所以压到 800ms。
+     */
+    if (!at_send_owned("AT", 800U, CMD_AT))
     {
         printf("[wx] AT self-test could not submit (engine busy)\r\n");
     }

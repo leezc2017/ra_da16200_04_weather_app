@@ -40,6 +40,20 @@ void weather_task_poll(void);
  */
 void weather_task_heartbeat_force(void);
 
+/* --- 最近一次天气抓取结论（缓存，见 weather_task.c 内 s_wxr 说明） ---
+ * 存在的理由：一次性的 [WX-RESULT] 打印很容易落在串口窗口外而彻底看不到，
+ * 缓存后结论是**被动可读**的：心跳行带 res= 字段，OLED 也能直接显示。
+ * 这样判断"天气到底通没通"不需要抓日志、不需要掐时间。 */
+
+/** @brief 结论字符串: "OK" / "HTTP ERR" / "PARSE ERR" / "TRANSPORT ERR" / "no fetch yet" */
+const char * weather_task_last_result(void);
+/** @brief 结论对应��温度(无数据显示 0) */
+int          weather_task_last_temp(void);
+/** @brief 上屏用的天气文案(ASCII, code 查表; 无数据返回 "--") */
+const char * weather_task_last_text(void);
+/** @brief 把结论拼成一行短文本, 供 OLED 显示 */
+void         weather_task_result_line(char * buf, uint16_t size);
+
 /**
  * @brief 当前 WiFi/配网状态（供诊断打印）
  * @return 五态之一
