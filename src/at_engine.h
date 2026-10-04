@@ -69,6 +69,9 @@ void             at_engine_init(void);
 void             at_engine_tick(uint32_t elapsed_ms);   /* 每主循环 tick 调用 */
 uint32_t         at_engine_now_ms(void);
 bool             at_engine_idle(void);
+
+/** @brief 当前模式: 0=AT_MODE_CMD, 1=AT_MODE_PAYLOAD。给串口提示用 */
+uint8_t          at_engine_mode(void);
 at_result_t      at_engine_start(const char * cmd, uint32_t timeout_ms);
 at_result_t      at_engine_start_ex(const char * cmd, uint32_t timeout_ms, at_mode_t mode);
 at_result_t      at_engine_poll(void);                   /* 每 tick 调用 */

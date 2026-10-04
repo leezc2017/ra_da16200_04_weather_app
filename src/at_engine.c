@@ -12,9 +12,12 @@
 #include "hal_data.h"
 #include "weather_cfg.h"        /* AT_ENG_TRACE: 逐命令诊断开关(默认关) */
 
-extern volatile bool wifi_uart_send_complete_flag;   /* hal_entry.c */
+/* ⚠ 只暴露计数器, 不暴露"发送完成"标志（2026-10-04）。
+ *   原来还有 wifi_uart_send_complete_flag, 引擎和 USB 转发两路共用它,
+ *   后到者清零就把先到者的等待偷走, 导致 1000ms 后误判 TX 超时。
+ *   现在各路记自己的计数器基线, 只增不减, 互不干扰。 */
 extern volatile uint32_t wifi_rx_byte_cnt;          /* hal_entry.c: 诊断计数 */
-extern volatile uint32_t wifi_tx_done_cnt;         /* hal_entry.c: 诊断计数 */
+extern volatile uint32_t wifi_tx_done_cnt;         /* hal_entry.c: TX 完成计数 */
 extern volatile uint32_t wifi_rx_drop_cnt;         /* hal_entry.c: 诊断计数 */
 
 typedef enum {
@@ -26,6 +29,7 @@ typedef enum {
 static struct {
     eng_state_t state;
     bool        submitted;                  /* R_SCI_UART_Write 已提交 */
+    uint32_t    tx_mark;                     /* 提交瞬间的 wifi_tx_done_cnt, TX 完成的判据(见下) */
     uint32_t    send_t0;                    /* 发送起点(ms), 用于 TX 超时 */
     uint32_t    deadline;                   /* 响应截止(ms) */
     uint32_t    timeout_ms;
@@ -134,6 +138,12 @@ uint32_t at_engine_now_ms(void)
 bool at_engine_idle(void)
 {
     return (ST_IDLE == s.state);
+}
+
+/** @brief 当前模式(AT_MODE_CMD=0 / AT_MODE_PAYLOAD=1)。供串口提示用 */
+uint8_t at_engine_mode(void)
+{
+    return (uint8_t)s.mode;
 }
 
 const at_resp_t * at_engine_resp(void)
@@ -495,13 +505,30 @@ at_result_t at_engine_poll(void)
 
             if (!s.submitted)
             {
-                wifi_uart_send_complete_flag = false;
+                /* ⚠ 用**计数器**而不是共享 bool 判 TX 完成（2026-10-04 修）。
+                 *
+                 * 原来这里等的是全局 wifi_uart_send_complete_flag，而
+                 * wifi_line_send()（USB 输入转发给 WIFI 口那条路）会
+                 * 忙等这个标志然后**把它清掉**。两个消费者共用一个
+                 * 无归属的标志 => 谁后到谁清掉，引擎的等待被偷走，
+                 * 于是 1000ms 后 TX_SUBMIT_TIMEOUT_MS 判超时，一条命令
+                 * 直接 TIMEOUT。这也解释了"串口敲命令从来没反应"：
+                 * 敲进去的字节既转发去撞引擎，又把引擎的等待清了。
+                 *
+                 * 现在改成"Write 之前记下计数器基线，计数器变了就算完成"。
+                 * 计数器只增不减，两路互不干扰，也不需要清零。
+                 * 基线必须在 Write **之前**取：若在其后取，而 TX_COMPLETE
+                 * 中断恰好在两者之间到达，基线会把那次完成吞掉，
+                 * 引擎就会一直等到 1000ms 超时。 */
+                uint32_t mark = wifi_tx_done_cnt;
+
                 if (FSP_SUCCESS == R_SCI_UART_Write(&g_wifi_uart_ctrl,
                                                     (uint8_t const *)s.cmd,
                                                     s.cmd_len))
                 {
                     s.submitted = true;
                     s.send_t0 = s.now;
+                    s.tx_mark  = mark;
                 }
                 else if ((s.now - s.send_t0) > TX_SUBMIT_TIMEOUT_MS)
                 {
@@ -510,9 +537,8 @@ at_result_t at_engine_poll(void)
                     s.final = AT_RES_TIMEOUT;
                 }
             }
-            else if (wifi_uart_send_complete_flag)
+            else if (wifi_tx_done_cnt != s.tx_mark)
             {
-                wifi_uart_send_complete_flag = false;
                 s.state = ST_WAIT;
                 s.deadline = s.now + s.timeout_ms;
             }

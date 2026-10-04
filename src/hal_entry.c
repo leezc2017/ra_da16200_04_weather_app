@@ -81,7 +81,6 @@ void usb_uart_cb (uart_callback_args_t * p_args)
 
 
 unsigned char wifi_uart_send_buff[100];
-volatile bool wifi_uart_send_complete_flag = false;
 
 /* 诊断计数器(供 at_engine/at_probe 打印): 区分"TX 没发出去"与"模块没回" */
 volatile uint32_t wifi_rx_byte_cnt  = 0;   /* wifi_uart_cb 收到的字节总数 */
@@ -97,14 +96,18 @@ static char wifi_rx_line[RX_LINE_MAX];
 static uint16_t wifi_rx_line_len = 0;
 
 
-/* DA16200 WIFI 口回调: 发送完成标志 + 收到字符入环形缓冲 */
+/* DA16200 WIFI 口回调: TX 完成计数 + 收到字符入环形缓冲
+ *
+ * ⚠ 这里**不再**置任何"发送完成"标志（2026-10-04）。
+ *   原来置的 wifi_uart_send_complete_flag 被两个消费者共用
+ *   (AT 引擎的 ST_SENDING 和 USB 转发的 wifi_line_send), 后到者清零,
+ *   于是先到者的等待被偷走。现在只累加计数器, 各消费者自己记基线。 */
 void wifi_uart_cb (uart_callback_args_t * p_args)
 {
     switch (p_args->event)
     {
         case UART_EVENT_TX_COMPLETE:
         {
-            wifi_uart_send_complete_flag = true;
             wifi_tx_done_cnt++;
             break;
         }
@@ -231,12 +234,19 @@ int _isatty(int fd)
     return 1;
 }
 
-/* 通过 WIFI 串口发送一行数据, 没有以 \r\n 结尾则自动补上 */
+/* 通过 WIFI 串口发送一行数据, 没有以 \r\n 结尾则自动补上
+ *
+ * ⚠ 引擎在途时**直接拒发**（2026-10-04 修）。
+ *   R_SCI_UART_Write 在前一次传输未完成时返回 FSP_ERR_IN_USE, 原来这里
+ *   只会打印一个 [ERR] wifi write, 用户完全看不懂为什么"敲了没反应"。
+ *   真正的原因是这个口正被 AT 引擎占用（天气请求在途时最容易撞上）。
+ *   现在明确告知, 并提示用 HB/WXTEST 这类本地命令 —— 它们不吃这个口。 */
 static void wifi_line_send (const char * p_buf, uint16_t len)
 {
     static char tx_buf[RX_LINE_MAX + 2];
     uint16_t tx_len = 0U;
     uint16_t wait;
+    uint32_t mark;
 
     if (len > RX_LINE_MAX)
     {
@@ -252,15 +262,29 @@ static void wifi_line_send (const char * p_buf, uint16_t len)
         tx_buf[tx_len++] = '\n';
     }
 
+    /* ⚠ 引擎占用时拒发, 而不是硬撞 FSP_ERR_IN_USE（见函数注释） */
+    if (!at_engine_idle())
+    {
+        printf("[TX] WIFI uart busy (engine owns it, mode=%u), not forwarded: %.*s\r\n",
+               (unsigned)at_engine_mode(), (int)tx_len, tx_buf);
+        printf("[TX] use HB / WXTEST instead, they do not touch this port\r\n");
+        return;
+    }
+
+    /* ⚠ 基线必须在 Write 之前取, 理由见 at_engine.c 同处注释。
+     * 引擎与本函数现在共用 wifi_tx_done_cnt 这个只增不减的计数器,
+     * 各自记自己的基线, 因此不需要"清标志"这种有归属问题的动作 ——
+     * 原来两边共用一个 bool 并由后到者清零, 会把对方的等待偷走。 */
+    mark = wifi_tx_done_cnt;
+
     err = R_SCI_UART_Write(&g_wifi_uart_ctrl, (uint8_t *)tx_buf, tx_len);
     if (FSP_SUCCESS == err)
     {
         /* 兜底超时: 避免 TX 中断丢失时永久卡死主循环 */
-        for (wait = 0U; (wait < WIFI_TX_WAIT_MS) && (false == wifi_uart_send_complete_flag); wait++)
+        for (wait = 0U; (wait < WIFI_TX_WAIT_MS) && (wifi_tx_done_cnt == mark); wait++)
         {
             R_BSP_SoftwareDelay(1U, BSP_DELAY_UNITS_MILLISECONDS);
         }
-        wifi_uart_send_complete_flag = false;
     }
     else
     {
