@@ -97,13 +97,13 @@ PC 串口助手 ──USB──> RA4M2 (SCI9) ──板内UART──> DA16200 (S
 1. `usb_uart_rx_process()`：从 `rx_ring` 取字节，按行组装（`\r` 或 `\n` 作为行结束），满行调用 `rx_line_flush()`（识别 `AUTO`/`AUTOB`/`ABORT` 本地命令，否则转发）。
 2. `wifi_uart_rx_process()`：同理从 `wifi_rx_ring` 组行，满行以 `[WIFI]` 打印；**每个字节同时喂给 `at_engine_rx()`**（引擎状态机 + URC 识别）。
 3. `usb_tx_pump()`：把 USB TX 环里的待发数据整段提交（兑现非阻塞打印）。
-4. `at_engine_tick(10)` → `at_engine_poll()` → `at_probe_poll()`：推进引擎与诊断序列（空闲时立即返回，主循环阻塞 ≤ 1 tick）。
+4. `at_engine_tick(10)` → 轮询：**诊断序列/正常天气状态机二选一**（`at_probe_running()` 判定，不能同时轮询引擎，DESIGN §4）。空闲时立即返回，主循环阻塞 ≤ 1 tick。
 5. `R_BSP_SoftwareDelay(10ms)`：节拍。
 
 ### 3.3 命令转发（`rx_line_flush()` / `wifi_line_send()`）
 
 - 打印 `[TX] <命令>` 回显到 USB。
-- `wifi_line_send()`：复制到临时缓冲，若行尾没有 `\r`/`\n` 则**自动补 `\r\n`**（这就是"PC 端按回车即可直接发 AT 命令"的实现），然后 `R_SCI_UART_Write` 发给 DA16200，等待发送完成标志。
+- `wifi_line_send()`：复制到临时缓冲，若行尾没有 `\r`/`\n` 则**自动补 `\r\n`**（这就是"PC 端按回车即可直接发 AT 命令"的实现），然后 `R_SCI_UART_Write` 发给 DA16200。2026-10-04 起**不再用共享的“发送完成标志”**判断完成：改为“提交前记一次 `wifi_tx_done_cnt` 基线，计数器变了即视为完成”（详见 §3.1 与设计文档 §9 #17）；引擎在途时会直接拒发并提示用 `HB`/`WXTEST`。
 
 ### 3.4 输出标记约定
 
