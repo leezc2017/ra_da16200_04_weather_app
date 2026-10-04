@@ -11,6 +11,7 @@
 #include "weather_text.h"
 #include "weather_ui.h"
 #include "weather_task.h"
+#include "weather_parse.h"
 #include "key_scan.h"
 
 #define TICK_MS          (10U)       /* 主循环节拍 */
@@ -295,6 +296,25 @@ static void rx_line_flush (void)
         else if (0 == strcmp(rx_line, "HB"))        /* 立即打印一次心跳快照 */
         {
             weather_task_heartbeat_force();
+        }
+        else if (0 == strcmp(rx_line, "WXTEST")) /* 解析层离线自检(不碰网络) */
+        {
+            /* 用心知接口的**真实响应**在目标板上跑一遍真 cJSON。
+             * 目的: 一次烧录就把"解析层坏了"和"链路没把 body 带回来"切开 ——
+             * 这两者的修法完全不同, 之前一直分不清才反复试错。 */
+            char info[72];
+
+            if (weather_parse_selftest(info, sizeof(info)))
+            {
+                printf("[WXTEST] PASS  parser ok on real body: %s\r\n", info);
+                printf("[WXTEST] => parser is fine; any weather failure is in the "
+                       "NWHTC transport, not in JSON parsing\r\n");
+            }
+            else
+            {
+                printf("[WXTEST] FAIL  %s\r\n", info);
+                printf("[WXTEST] => parser is broken; the network side is irrelevant\r\n");
+            }
         }
         else if (0 == strcmp(rx_line, "AUTO"))      /* 启动阶段1自动诊断 */
         {

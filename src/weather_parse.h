@@ -6,6 +6,7 @@
 #define _WEATHER_PARSE_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef struct {
     char     text[32];      /* 天气现象: "Sunny" */
@@ -16,5 +17,26 @@ typedef struct {
 
 /* 从 body 提取 results[0].now + last_update, 成功返回 0 */
 int weather_parse_now(const char *body, weather_data_t *out);
+
+/**
+ * @brief 解析器离线自检：拿一份**实测抓到的真实响应**跑一遍解析
+ *
+ * 为什么需要（2026-10-04）：
+ *   第一次排查"天气出不来"时，我无法区分是**链路没把 body 带回来**还是
+ *   **解析把这份 body 解析坏了**，而这两者的修法完全不同。更糟的是我
+ *   没有把心知返回的真实 JSON 弄到手就按字段名猜（猜的是 ads/lc，
+ *   实际是 code/temperature），等于在猜。
+ *
+ *   本机没有可用的主机 C 编译器（只有 arm-none-eabi，跑不了），所以把
+ *   真实 body 嵌进固件，串口敲 WXTEST 即可在目标板上直接跑真 cJSON。
+ *   一次烧录就能把"解析层"和"传输层"彻底切开：
+ *     WXTEST PASS  -> 解析层没问题，锅一定在 NWHTC 传输/收口那一侧
+ *     WXTEST FAIL  -> 解析层有问题，与网络无关
+ *
+ * @param out_buf  结果摘要缓冲（打印用，ASCII）
+ * @param size     缓冲大小
+ * @return true=解析成功且字段值与预期一致
+ */
+bool weather_parse_selftest(char * out_buf, uint16_t size);
 
 #endif /* _WEATHER_PARSE_H_ */

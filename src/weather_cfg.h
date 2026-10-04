@@ -70,8 +70,27 @@
 #define PROBE_HTTP_TIMEOUT_MS    25000
 
 /* ===================== 5. 阶段2 天气链路 ================ */
-/* 天气请求超时(NWHTC 模式, 需覆盖 DNS+连接+传输) */
-#define WEATHER_HTTP_TIMEOUT_MS  20000
+/* Weather request timeout (NWHTC mode, must cover DNS + connect + transfer).
+ *
+ * TIMEBASE (corrected 2026-10-04, my earlier note here was wrong in BOTH
+ * direction and magnitude, and it sent me diagnosing a timeout that never
+ * happened). The engine clock is at_engine_tick(10) once per main-loop
+ * iteration, and an iteration is:
+ *     delay(10 ms) + work + tick(10)
+ * so the engine clock tracks real time closely. OLED redraw costs roughly
+ * 40..90 ms but ui_dirty gates it to one redraw per state transition, so
+ * the total skew over a session is on the order of 1..2 s. The engine
+ * clock is therefore never 10x fast; it is equal to or slightly slow.
+ *
+ * 20000 is about 20 real seconds, which covers DNS + TCP + TLS + HTTP to
+ * seniverse with room to spare. Keep it. Do NOT raise it to 120000: on a
+ * failure that would block the command ladder for two real minutes.
+ *
+ * How to tell a genuine timeout from "has not finished yet": the [ST] /
+ * [hb] line shows eng=1/2 while in flight and eng=0 once the engine has
+ * closed, and res= then carries the verdict. A verdict of TRANSPORT ERR
+ * means the engine really did wait the full timeout with no reply. */
+#define WEATHER_HTTP_TIMEOUT_MS  20000U
 /* 轮询节拍: 主循环每 tick 调一次 weather_task_poll() */
 #define WEATHER_TICK_MS          10U
 /* 时间查询周期(ms): RA 无 RTC, 主页时钟靠查 DA16200 的 AT+TIME */

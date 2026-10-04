@@ -114,6 +114,8 @@ static struct {
     /* 心跳诊断(WEATHER_HB_DIAG_MS=0 时不打印) */
     uint32_t hb_t0;
     uint32_t hb_fast;      /**< fetch 在途时的 1s 心跳时基 */
+    uint32_t fetch_t0;     /**< 本次 fetch 发起时刻, 供 OLED 显示已等秒数 */
+    uint32_t fetch_sec;    /**< 上次刷新的已等秒数, 变了就置 ui_dirty 重绘 */
 } s;
 
 /* hal_entry.c 的诊断计数器(判断日志/数据是否被丢) */
@@ -250,11 +252,12 @@ static void dump_state (const char * tag)
     key_raw_levels(&k1, &k2);
     at_engine_diag(&d);
 
-    printf("[ST] %-6s t=%-5s | wifi=%-10s ip=%-15s ssid=%-10s f=%u | "
+    printf("[ST] %-6s clk=%-5s | wifi=%-10s ip=%-15s ssid=%-10s f=%u | "
            "tz=%u sntp=%u wx=%u pg=%u | "
            "cmd=%-6s(%u) eng=%u mode=%u http=%u step=%u try=%u | "
            "res=%-12s hc=%d nw=%d blen=%u | "
-           "rx=%lu ln=%lu plus=%u urc=%u/%u drop=%lu/%lu | k1=%u k2=%u t=%lu\r\n",
+           "rx=%lu ln=%lu plus=%lu urc=%u/%u drop=%lu/%lu | k1=%u k2=%u "
+           "fsec=%u up=%lu\r\n",
            tag,
            (s.time_str[0] != '\0') ? s.time_str : "--:--",
            wifi_st_name(s.status), s.ip, s.ssid, (unsigned)s.fails,
@@ -271,6 +274,12 @@ static void dump_state (const char * tag)
            (unsigned)d.urc_cnt, (unsigned)d.seen_cnt,
            (unsigned long)wifi_rx_drop_cnt, (unsigned long)usb_tx_drop_cnt,
            (unsigned)k1, (unsigned)k2,
+           /* fsec= 本次 fetch 已等秒数(未在途时为 0xFFFFFFFF, 打印成 up 后难以
+            * 辨识, 所以在途时才显示有效值)。两个时间字段改名为 clk / up:
+            * 之前都叫 t=, 我自己把 up 读成了"距离某事件的时间", 导致把
+            * "[hb] 1s"误当成"请求发出很久了"。名字必须能自解释。 */
+           weather_http_busy() ?
+               (unsigned)((at_engine_now_ms() - s.fetch_t0) / 1000UL) : 0U,
            (unsigned long)(at_engine_now_ms() / 1000UL));
 }
 
@@ -290,11 +299,15 @@ static void hb_print (uint32_t now)
      *   tz=1 sntp=1 wx=0           -> 正在拉第一次天气
      *   wx=1                       -> 天气已就位，之后进入 15min 定时刷新
      * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）。 */
-    printf("[hb] %lus eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
+    printf("[hb] up=%lus fsec=%us eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
            "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
            "kraw=%u%u res=%s/%d "
            "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
            (unsigned long)(now / 1000UL),
+           /* fsec= 本次 fetch 已等秒数(不在途时为 0)。2026-10-04 加:
+            * 之前这行只有一个含糊的秒数, 我误把它读成"请求已发出多久",
+            * 于是把"请求刚发出 1 秒"当成"抓取卡住了"。 */
+           weather_http_busy() ? (unsigned)((now - s.fetch_t0) / 1000UL) : 0U,
            d.state, d.mode, d.urc_cnt, d.seen_cnt,
            (unsigned long)d.rx_bytes, (unsigned long)d.lines,
            (unsigned long)d.plus_lines,
@@ -624,6 +637,12 @@ static bool fetch_weather_start (void)
     if (weather_http_get_start(url, WEATHER_HTTP_TIMEOUT_MS))
     {
         s.cmd = CMD_HTTP;            /* 重要: 标记引擎当前在服务 HTTP 命令 */
+        /* 记发起时刻, 让 OLED 能显示"已经等了几秒"。
+         * 2026-10-04 的误判: 抓到的日志停在 [hb] 1s(请求刚发出 1 秒)就被当成
+         * "抓取有问题"。屏幕上必须能看出"还在飞"和"等了几秒"。 */
+        s.fetch_t0  = at_engine_now_ms();
+        s.fetch_sec = 0xFFFFFFFFU;    /* 强制首帧就重绘 */
+        s.ui_dirty  = true;
         return true;
     }
     return false;
@@ -658,9 +677,17 @@ static void fetch_weather_done (void)
 
         if (0 != weather_parse_now(body, &s.wx))
         {
+            /* 解析失败时把 JSON 打全 —— cJSON 不说失败原因, 只有字节能说。
+             * 分两段打, 避免单行过长被终端折行后看不清边界。 */
+            uint16_t n = s_wxr.body_len;
+            uint16_t half = (uint16_t)(n / 2U);
+
             s_wxr.kind = WXR_PARSE_ERR;
-            printf("[WX-RESULT] PARSE-FAIL http=200 nw=%d len=%d body=%.60s\r\n",
-                   res->nw_status, res->len, body);
+            printf("[WX-RESULT] PARSE-FAIL http=200 nw=%d len=%u\r\n",
+                   res->nw_status, res->len);
+            printf("[JSON-1/2] %.*s\r\n", (int)half, body);
+            printf("[JSON-2/2] %.*s\r\n",
+                   (int)((uint16_t)(n - half)), &body[half]);
             s.ui_dirty = true;
             return;
         }
@@ -858,16 +885,34 @@ static void ui_refresh (void)
         }
         else
         {
-            /* ⚠ 没拿到天气时**直接把失败原因显示在屏幕上**，不再只显示
-             * "waiting data.."（2026-10-04）。
+            /* ⚠ 没拿到天气时**直接把当前阶段显示在屏幕上**（2026-10-04）。
              *
-             * 之前 OLED 只说"等数据"，无法区分"还在等模块回包"、"HTTP 非 200"
+             * 之前只显示 "waiting data.."，无法区分"请求还在飞"、"HTTP 非 200"
              * 和"cJSON 解析失败"三种完全不同的情况，只能靠翻串口日志 ——
-             * 而结论行偏偏容易落在串口窗口外。现在屏幕上直接给出结论，
-             * **看一眼屏幕就知道通没通，不需要抓日志、不需要掐时间**。 */
-            if (s.status == WIFI_STAT_CONNECTED)
+             * 而结论行偏偏容易落在串口窗口外。2026-10-04 这次又因此误判：
+             * 抓到的日志停在 `[hb] 1s ... res=no fetch yet`，那只是**请求刚发出
+             * 1 秒**，模块还没回包，就被当成"抓取有问题"。屏幕必须能区分
+             * "还在飞"和"卡住了"，否则每次都会重复这个误判。
+             *
+             * 优先级（从上到下）：
+             *   1. 请求在途        -> "fetching.. Ns"（带已等秒数，看得见它在走）
+             *   2. 已联网但没结论  -> 结论本身（OK/ERR/no fetch yet）
+             *   3. 还没联网        -> 联网阶段（connecting / connecting.. Ns） */
+            if (weather_http_busy())
+            {
+                uint32_t el = (uint32_t)(at_engine_now_ms() - s.fetch_t0) / 1000U;
+
+                snprintf(mv.wtext, sizeof(mv.wtext), "fetching.. %us", (unsigned)el);
+            }
+            else if (s.status == WIFI_STAT_CONNECTED)
             {
                 weather_task_result_line(mv.wtext, sizeof(mv.wtext));
+            }
+            else if (s.connect_t0 != 0U)
+            {
+                uint32_t el = (uint32_t)(at_engine_now_ms() - s.connect_t0) / 1000U;
+
+                snprintf(mv.wtext, sizeof(mv.wtext), "connecting.. %us", (unsigned)el);
             }
             mv.icon = 0xFFU;
         }
@@ -1178,7 +1223,19 @@ void weather_task_poll (void)
      * 不在途时行为不变，仍是 WEATHER_HB_DIAG_MS（低频），不违反诊断低频原则。 */
     if (weather_http_busy() && ((now - s.hb_fast) >= 1000U))
     {
+        uint32_t sec = (uint32_t)(now - s.fetch_t0) / 1000U;
+
         s.hb_fast = now;
+
+        /* 同一个 1s 节拍顺便刷新屏幕上的"已等 N 秒"。
+         * 不另开节拍: 在途时本来就要 1s 一次, 复用它最省, 而且屏幕
+         * 和日志说的是同一个数字, 不会出现两边对不上的情况。
+         * 每秒只重绘一行文字, 开销可忽略(软 SPI 约 40~90ms/屏)。 */
+        if (sec != s.fetch_sec)
+        {
+            s.fetch_sec = sec;
+            s.ui_dirty  = true;
+        }
         hb_print(now);
     }
 

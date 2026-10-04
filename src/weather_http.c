@@ -291,6 +291,30 @@ void weather_http_on_engine_done (at_result_t r)
     printf("[wx] http ok: nwstatus=%d http=%d ctype=%s body=%uB\r\n",
            s.res.nw_status, http_status, s.content_type, (unsigned)body_len);
 
+    /* ⚠ 把原始响应和 JSON 正文原样打出来（2026-10-04）。
+     *
+     * 之前 [WIFI] 回显在 payload 期间被关掉了（为了不让 HTTP 头把结论挤出
+     * 串口窗口），但那样一来**响应内容自己也看不到**了，出现"收到多少字节、
+     * 头长什么样、JSON 完整不完整"都无法核对。这里补回来，但只打**头 3 行 +
+     * 正文前 200 字节**，远小于原来 15 行的全量回显，窗口放得下。
+     *
+     * 关键背景：AT+NWHTC 的真实字节流是
+     *     "OK\r\nHTTP/1.1 200 OK\r\n<headers>\r\n\r\n{json}"
+     * 开头那个裸 OK 是同步回执，会把"buf 开头即状态行"的假设打破（已修）。
+     */
+    {
+        uint16_t show = (resp->len < 120U) ? resp->len : 120U;
+
+        printf("[RAW] resp_len=%u head=%.*s\r\n",
+               (unsigned)resp->len, (int)show, resp->buf);
+    }
+    {
+        uint16_t show = (body_len < 200U) ? body_len : 200U;
+
+        printf("[BODY] len=%u json=%.*s\r\n",
+               (unsigned)body_len, (int)show, body);
+    }
+
     s.state = WH_DONE;
 }
 
