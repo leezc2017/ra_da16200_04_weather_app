@@ -79,6 +79,10 @@ PC 串口助手 ──USB──> RA4M2 (SCI9) ──板内UART──> DA16200 (S
 输入约定（阶段1）：`AUTO` 启动全链路诊断，`AUTOB` 启动开机自动重连测试，`ABORT` 中止；
 诊断期间其余输入被屏蔽（防透传与引擎 TX 冲突）；空闲时输入仍按阶段0透传。
 
+阶段2 另增本地命令（不占透传通路）：`KEY` 打印两个机械键原始电平；`HB`
+立即打印一次心跳快照；`WXTEST` 离线跑真实心知响应（不碰网络），用于
+把"解析层"与"传输层"切开（见 DESIGN §9 #16）。
+
 ### 3.1 中断回调（ISR 只做入队）
 
 - `usb_uart_cb()`：USB 串口收到字符（`UART_EVENT_RX_CHAR`）写入 `rx_ring[]` 环形缓冲（8KB，满则丢弃）；`UART_EVENT_TX_COMPLETE` 清 `usb_tx_busy` 允许 pump 下一段。
@@ -169,7 +173,18 @@ GBK SSID 被劈开——**丢字节，不是缓冲区截断**，任何基于 `[W
 RA E2STUDIO 4.weather_app
 USB input -> WIFI uart (auto CRLF), WIFI response back to USB
 Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop
+Local: KEY = key pin levels now, HB = heartbeat snapshot now
+       WXTEST = parse the real seniverse body offline (no network)
 ```
+
+注意：阶段1 的 `AUTO`/`AUTOB`/`ABORT` 与阶段2 的天气状态机**互斥**，诊断
+期间走 `at_probe_poll()`，正常期间走 `weather_task_poll()`，由
+`at_probe_running()` 判定，绝不能同时轮询引擎（DESIGN §4）。
+
+> 2026-10-04 本地命令（`KEY`/`HB`/`WXTEST`）的输入与透传路径已做归属
+> 隔离：`wifi_uart_send_complete_flag` 已彻底移除（见 DESIGN §9 #17），
+> 本地命令不再把"发送完成"标志偷走——否则 AT 引擎的 ST_SENDING 会被
+> 误判超时（见 commit 4456638 的根因说明）。
 
 随后 `at_engine_init()` → `oled_port_init()` → `weather_task_init()`。
 
