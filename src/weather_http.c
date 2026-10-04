@@ -71,33 +71,43 @@ static void split_http (const char * buf, uint16_t n,
     *out_body_len = 0U;
     *out_status   = 0;
 
-    /* 1) 跳过前导空白，找到状态行 */
-    while ((i < n) && (('\r' == buf[i]) || ('\n' == buf[i]) ||
-                      (' ' == buf[i]) || ('\t' == buf[i])))
+    /* 1) 定位状态行。
+     *
+     * ⚠ 不能假设 buf 开头就是状态行（2026-10-04 实测踩坑）：
+     *   AT+NWHTC 发完命令后模块**先回一个 6 字节裸 OK**（同步回执），
+     *   正文才异步流式推送。所以 resp.buf 的真实内容是：
+     *       "OK\r\nHTTP/1.1 200 OK\r\nDate: ...\r\n\r\n{json}"
+     *   旧实现从 buf[0] 开始找"第一个空格后的数字"，在 "OK" 这一行里
+     *   找不到空格，直接越到行尾 -> http_status 恒为 0 ->
+     *   fetch_weather_done() 判 !=200 -> 打印 FAIL -> wx_valid 永远为 false
+     *   -> OLED 一直 "waiting data.."。实测响应确实完整到达（能看到
+     *   +NWHTCSTATUS:0），但从没进到 cJSON。
+     *
+     *   正解：先找 "HTTP/" 再从它后面取状态码。
+     */
+    for (i = 0U; (i + 5U) < n; i++)
     {
-        i++;
+        if (0 == strncmp(&buf[i], "HTTP/", 5U))
+        {
+            break;
+        }
     }
-    /* 首行形如 "HTTP/1.1 200 OK" —— 从第一个空格后取数字 */
+    if ((i + 5U) < n)
     {
-        uint16_t row_start = i;
+        uint16_t p = (uint16_t)(i + 5U);      /* 跳过 "HTTP/" */
 
-        while ((i < n) && ('\r' != buf[i]) && ('\n' != buf[i]))
+        while ((p < n) && (' ' != buf[p]) && ('\r' != buf[p]) && ('\n' != buf[p]))
         {
-            i++;
+            p++;                             /* 跳过 "1.1" */
         }
-        while ((row_start < i) && (' ' != buf[row_start]))
+        while ((p < n) && (' ' == buf[p]))
         {
-            row_start++;
+            p++;
         }
-        row_start++;                                    /* 跳过空格 */
-        while ((row_start < i) && (' ' == buf[row_start]))
+        while ((p < n) && (buf[p] >= '0') && (buf[p] <= '9'))
         {
-            row_start++;
-        }
-        while ((row_start < i) && (buf[row_start] >= '0') && (buf[row_start] <= '9'))
-        {
-            code = (code * 10) + (buf[row_start] - '0');
-            row_start++;
+            code = (code * 10) + (buf[p] - '0');
+            p++;
         }
     }
 
