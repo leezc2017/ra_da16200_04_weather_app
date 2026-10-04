@@ -79,6 +79,15 @@ uint32_t         at_engine_rx_len(void);                 /* 诊断用: 已采集
 bool             at_engine_urc_take(const char * prefix);/* 匹配并消费一条 URC(只给 bool) */
 void             at_engine_diag(at_engine_diag_t * out);  /* 取状态快照 */
 
+/**
+ * @brief 当前是否有 NWHTC 正文正在推送
+ *
+ * 用于关掉 [WIFI] 回显：payload 期间模块回的每个字节都已存进 resp.buf，
+ * 解析走的是那份缓冲，回显是冗余的，而 15 行 HTTP 头会把真正的解析结论
+ * 顶出串口窗口（实测窗口约 44 行）。
+ */
+bool             at_engine_payload_active(void);
+
 /* --- 被动监听用（风险#4 开机自动重连）---
  * urc_seen() 只查不删, 且不受 4 槽 FIFO 深度限制(用 sticky 槽位记录),
  * 因此 45s 监听期内即使 URC 超过 4 条也不会漏判。 */

@@ -264,6 +264,11 @@ void at_engine_urc_trace(bool on)
     s.trace_t0 = s.now;
 }
 
+bool at_engine_payload_active(void)
+{
+    return ((AT_MODE_PAYLOAD == s.mode) && (ST_IDLE != s.state));
+}
+
 bool at_engine_urc_take(const char * prefix)
 {
     size_t plen = strlen(prefix);

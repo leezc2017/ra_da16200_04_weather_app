@@ -677,7 +677,23 @@ static void ui_refresh (void)
         if (s.wx_valid)
         {
             snprintf(mv.temp_str, sizeof(mv.temp_str), "%dC", s.wx.temperature);
-            snprintf(mv.wtext, sizeof(mv.wtext), "%s", s.wx.text);
+            /* ⚠ 用 code 查表而不是直接显示 API 的 now.text（2026-10-04）。
+             *
+             * 心知 API 返回 UTF-8（"晴" = E6 99 B4），而 OLED 点阵字模是按
+             * GB2312/GBK 索引的（oledfont.h 的 Hzk[]）。把 UTF-8 字节直接喂
+             * OLED_ShowString 会按 GBK 拆成两个错字 —— 这不是本工程的移植
+             * 遗漏：GD32 版 weather_ui.c / oled.c 与本工程**逐字节相同**，
+             * 它同样如此（两边都没有编码转换，URL 也都带 language=zh-Hans）。
+             *
+             * 而中文这条路目前根本铺好：oled_font_data/oled_cn_font.c 里
+             * 只有占位记录、没有任何真实字模数据，oledfont.h 的 Hzk[] 也只有
+             * 7 个汉字。所以先走 weather_text_get(code) 的英文表 ——
+             * 纯 ASCII，与字库匹配，必然正确。weather_text.h 里本来就规定
+             * "一律用 code 匹配，不要用 now.text 直接 strcmp"。
+             * s.wx.text 仍保留在 [WX-RESULT] 日志里便于核对。
+             * 待 tools/glyph2c.py 生成中文字模表后，再切回中文显示。 */
+            snprintf(mv.wtext, sizeof(mv.wtext), "%s",
+                     weather_text_get(s.wx.code));
             mv.icon    = (uint8_t)weather_icon_of(s.wx.code);
             mv.offline = (s.status != WIFI_STAT_CONNECTED) ? 1U : 0U;
         }

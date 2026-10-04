@@ -346,12 +346,30 @@ static void usb_uart_rx_process (void)
     }
 }
 
+/* WIFI echo switch: turned off while an NWHTC payload is streaming.
+ *
+ * Why it must be off (measured 2026-10-04):
+ *   The serial tool shows roughly 44 lines. One weather response spends 15 of
+ *   them on HTTP headers (Date, Content-Type, etag, x-ratelimit-*, x-tenant-id)
+ *   plus 2 on the JSON body, which pushes "[WX-RESULT]" - the actual parse
+ *   verdict - onto line 45, just past the fold. Several rounds were
+ *   misread as "parsing never ran" because of this.
+ *
+ *   Suppressing it is safe: while the payload streams, every byte the module
+ *   sends is already captured into resp.buf by at_engine_rx(), and
+ *   weather_http slices the body from there for cJSON. The echo is redundant.
+ *   Ordinary commands (OK, ERROR, +TIME, +NWIP, ...) still print in full,
+ *   those lines are worth reading.
+ */
 static void wifi_rx_line_flush (void)
 {
     if (wifi_rx_line_len > 0U)
     {
         wifi_rx_line[wifi_rx_line_len] = '\0';
-        printf("[WIFI] %s\r\n", wifi_rx_line);
+        if (!at_engine_payload_active())
+        {
+            printf("[WIFI] %s\r\n", wifi_rx_line);
+        }
         wifi_rx_line_len = 0U;
     }
 }
