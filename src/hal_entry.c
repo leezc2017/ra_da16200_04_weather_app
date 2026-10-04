@@ -440,6 +440,7 @@ void hal_entry(void)
     printf("USB input -> WIFI uart (auto CRLF), WIFI response back to USB\r\n");
     printf("Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop\r\n");
     printf("Local: KEY = key pin levels now, HB = heartbeat snapshot now\r\n");
+    printf("       WXTEST = parse the real seniverse body offline (no network)\r\n");
 
     at_engine_init();
     oled_port_init();
