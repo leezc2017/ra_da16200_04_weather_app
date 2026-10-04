@@ -197,6 +197,83 @@ void weather_task_heartbeat_force (void)
     hb_print(at_engine_now_ms());
 }
 
+/** @brief wifi_status_t -> 短名(ASCII, 便于日志 grep) */
+static const char * wifi_st_name (wifi_status_t st)
+{
+    switch (st)
+    {
+        case WIFI_STAT_IDLE:          return "IDLE";
+        case WIFI_STAT_PROVISIONING:  return "PROV";
+        case WIFI_STAT_CONNECTING:    return "CONNECTING";
+        case WIFI_STAT_CONNECTED:     return "CONNECTED";
+        case WIFI_STAT_FAIL:          return "FAIL";
+        default:                      return "?";
+    }
+}
+
+/** @brief cmd_owner_t -> 短名(与实际下发的 AT 命令对应) */
+static const char * cmd_st_name (cmd_owner_t c)
+{
+    switch (c)
+    {
+        case CMD_NONE:    return "none";
+        case CMD_AT:      return "AT";
+        case CMD_TIME:    return "TIME";
+        case CMD_TZSET:   return "TZONE";
+        case CMD_SNTP:    return "SNTP";
+        case CMD_NWIP:    return "NWIP";
+        case CMD_WFCAP:   return "WFCAP";
+        case CMD_WFJAPA:  return "WFJAPA";
+        case CMD_HTTP:    return "NWHTC";
+        default:          return "?";
+    }
+}
+
+/**
+ * @brief 状态总表：把所有状态位打成**一行**
+ *
+ * 存在的理由（2026-10-04）：之前每一层各自打印一小段，导致"当前到底什么状态"
+ * 必须靠人把散落各处的行拼起来看，而其中关键几行又经常落在串口窗口之外 ——
+ * 于是变成反复让用户贴日志、掐时间等。这里改成一行给全，**看一行就够**。
+ *
+ * 只在两个时机调用，都是低频：
+ *   - 开机(warmup)          : 全部初始状态
+ *   - 每次界面刷新(redraw)  : 每次状态迁移（联网成功/抓取完成/按键翻页）
+ * 加上 5s/1s 心跳作为"没有变化时"的兜底。三者合起来覆盖全部时机。
+ */
+static void dump_state (const char * tag)
+{
+    at_engine_diag_t d;
+    uint8_t k1 = 0U;
+    uint8_t k2 = 0U;
+
+    key_raw_levels(&k1, &k2);
+    at_engine_diag(&d);
+
+    printf("[ST] %-6s t=%-5s | wifi=%-10s ip=%-15s ssid=%-10s f=%u | "
+           "tz=%u sntp=%u wx=%u pg=%u | "
+           "cmd=%-6s(%u) eng=%u mode=%u http=%u step=%u try=%u | "
+           "res=%-12s hc=%d nw=%d blen=%u | "
+           "rx=%lu ln=%lu plus=%u urc=%u/%u drop=%lu/%lu | k1=%u k2=%u t=%lu\r\n",
+           tag,
+           (s.time_str[0] != '\0') ? s.time_str : "--:--",
+           wifi_st_name(s.status), s.ip, s.ssid, (unsigned)s.fails,
+           (unsigned)(s.timezone_set ? 1U : 0U),
+           (unsigned)(s.sntp_done    ? 1U : 0U),
+           (unsigned)(s.wx_valid     ? 1U : 0U),
+           (unsigned)s.page,
+           cmd_st_name(s.cmd), (unsigned)s.cmd,
+           d.state, d.mode, (unsigned)weather_http_busy(),
+           (unsigned)s.wifi_step, (unsigned)s.wifi_try,
+           weather_task_last_result(), s_wxr.http, s_wxr.nw, (unsigned)s_wxr.body_len,
+           (unsigned long)d.rx_bytes, (unsigned long)d.lines,
+           (unsigned long)d.plus_lines,
+           (unsigned)d.urc_cnt, (unsigned)d.seen_cnt,
+           (unsigned long)wifi_rx_drop_cnt, (unsigned long)usb_tx_drop_cnt,
+           (unsigned)k1, (unsigned)k2,
+           (unsigned long)(at_engine_now_ms() / 1000UL));
+}
+
 static void hb_print (uint32_t now)
 {
     at_engine_diag_t d;
@@ -654,7 +731,8 @@ static void on_cmd_done (at_result_t r)
             break;
 
         case CMD_SNTP:
-            printf("[wx] SNTP %s\r\n", (AT_RES_OK == r) ? "started" : "FAIL");
+            printf("[wx] SNTP %s (settle in %ums)\r\n",
+                   (AT_RES_OK == r) ? "started" : "FAIL", (unsigned)SNTP_SETTLE_MS);
             /* SNTP 生效需数秒: 把下次查时间提前到 +SNTP_SETTLE_MS */
             s.time_poll_ms = (at_engine_now_ms() + SNTP_SETTLE_MS) -
                              (WEATHER_TIME_POLL_MS);
@@ -845,6 +923,9 @@ void weather_task_init (void)
     {
         printf("[wx] AT self-test sent\r\n");
     }
+
+    /* 开机状态总表: 之后每次界面刷新都会再打一行, 两行即可看清整个启动过程 */
+    dump_state("boot");
 }
 
 void weather_task_refresh_now (void)
@@ -1101,10 +1182,14 @@ void weather_task_poll (void)
         hb_print(now);
     }
 
-    /* ---------- 6. 重绘 ---------- */
+    /* ---------- 6. 重绘 + 状态快照 ---------- */
     if (s.ui_dirty)
     {
         s.ui_dirty = false;
         ui_refresh();
+        /* 每次状态迁移（联网成功 / 抓取完成 / 按键翻页 / 页面切换）都打一行
+         * 完整状态，这样"当前处于哪个状态"永远是日志里可查的，不需要
+         * 把各处零散的小段拼起来猜，也不需要用户掐时间等某一行出现。 */
+        dump_state("redraw");
     }
 }
