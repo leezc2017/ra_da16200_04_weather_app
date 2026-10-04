@@ -32,6 +32,15 @@ void weather_task_init(void);
 void weather_task_poll(void);
 
 /**
+ * @brief 立即打印一次心跳快照（不等 WEATHER_HB_DIAG_MS 周期）
+ *
+ * 供串口输入 "HB" 调用。用途：串口助手一般只显示第一屏约 20~25 行，
+ * 而心跳要等 5s、按键事件要等用户动手，两者都落在窗口外。
+ * 由用户主动触发，响应直接追加到当前可见区，绕开窗口大小限制。
+ */
+void weather_task_heartbeat_force(void);
+
+/**
  * @brief 当前 WiFi/配网状态（供诊断打印）
  * @return 五态之一
  */

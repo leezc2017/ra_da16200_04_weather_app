@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include "at_engine.h"
 #include "hal_data.h"
+#include "weather_cfg.h"        /* AT_ENG_TRACE: 逐命令诊断开关(默认关) */
 
 extern volatile bool wifi_uart_send_complete_flag;   /* hal_entry.c */
 extern volatile uint32_t wifi_rx_byte_cnt;          /* hal_entry.c: 诊断计数 */
@@ -454,12 +455,18 @@ void at_engine_rx(char c)
     }
 }
 
-/* 超时诊断: 区分"TX 没发出去"(SENDING)与"TX 发出去了但模块没回"(WAIT) */
+/* 超时诊断: 区分"TX 没发出去"(SENDING)与"TX 发出去了但模块没回"(WAIT)。
+ * 与逐命令收口摘要一样受 AT_ENG_TRACE 控制: 冷启动自检超时是常态,
+ * 每条都打会把启动日志顶出串口窗口。 */
 static void eng_timeout (const char * stage)
 {
+#if (AT_ENG_TRACE > 0)
     printf("[ENG] TIMEOUT@%s  wifi_rx=%lu wifi_txdone=%lu rxdrop=%lu\r\n",
            stage, (unsigned long)wifi_rx_byte_cnt, (unsigned long)wifi_tx_done_cnt,
            (unsigned long)wifi_rx_drop_cnt);
+#else
+    (void)stage;
+#endif
 }
 
 at_result_t at_engine_poll(void)
@@ -538,12 +545,14 @@ at_result_t at_engine_poll(void)
     }
 
     /* 收口摘要: 仅在本次 poll 把状态从"在途"推进到 IDLE 的那一 tick 打印一次。
-     * 判读:
+     * 由 AT_ENG_TRACE 控制(默认关, 见 weather_cfg.h: 每条命令一行会把启动日志
+     * 顶出串口窗口)。判读:
      *   lines=0        -> 一个 \r\n 都没组装出来(收不到数据/收字节路径断)
      *   max=255        -> 触发行溢出(AT_LINE_MAX-1), 超长行不参与终止检测
      *   plus=0         -> 没收到任何 '+' 开头行, +NWHTCSTATUS 没进来
      *   plus>0 且 nw=-1 -> '+' 行有但 status 没解析出来
      *   ovfbuf=1       -> 4KB 响应缓冲溢出(正文被截) */
+#if (AT_ENG_TRACE > 0)
     if ((!was_idle) && (ST_IDLE == s.state) && (AT_RES_PENDING != s.final))
     {
         printf("[ENG] close=%s lines=%u max=%u ovf=%u plus=%u nw=%d len=%u ovfbuf=%u\r\n",
@@ -553,6 +562,7 @@ at_result_t at_engine_poll(void)
                s.resp.status, (unsigned)s.resp.len,
                s.resp.overflow ? 1U : 0U);
     }
+#endif
 
     return (ST_IDLE == s.state) ? s.final : AT_RES_PENDING;
 }

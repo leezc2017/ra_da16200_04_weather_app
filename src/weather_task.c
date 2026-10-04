@@ -126,6 +126,13 @@ extern volatile uint32_t wifi_rx_byte_cnt;
  * 定位"程序不动了"时非常有用：如果本行在刷新而 [WIFI] 不刷新，
  * 说明是 WIFI 口没数据；连本行都不刷新，才是主循环真的卡住。
  */
+static void hb_print (uint32_t now);
+
+void weather_task_heartbeat_force (void)
+{
+    hb_print(at_engine_now_ms());
+}
+
 static void hb_print (uint32_t now)
 {
     at_engine_diag_t d;

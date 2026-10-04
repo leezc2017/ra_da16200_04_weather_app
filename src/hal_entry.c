@@ -11,6 +11,7 @@
 #include "weather_text.h"
 #include "weather_ui.h"
 #include "weather_task.h"
+#include "key_scan.h"
 
 #define TICK_MS          (10U)       /* 主循环节拍 */
 #define USB_TX_RING_SIZE  (4096U)     /* USB TX 环形缓冲: printf 入队, 主循环泵发, 不阻塞 */
@@ -266,14 +267,36 @@ static void wifi_line_send (const char * p_buf, uint16_t len)
     }
 }
 
-/* USB 输入的一行: 本地命令(AUTO/ABORT)处理, 否则转发给 WIFI 串口 */
+/* USB 输入的一行: 本地命令(KEY/HB/AUTO/ABORT)处理, 否则转发给 WIFI 串口
+ *
+ * ⚠ KEY / HB 是为"串口窗口只看得到第一屏"设计的。
+ *   串口助手一般只显示约 20~25 行, 而心跳要 5s 才出现、按键事件要等用户动手,
+ *   两者都落在窗口之外 —— 实测连续七次抓取都只截到启动阶段的 AT+NWSNTP,
+ *   因此按键/心跳**从来没出现在任何一次粘贴的日志里**, 无法据此判断。
+ *   这两个命令由用户主动敲下, 响应直接追加到屏幕**底部**(当前可见区),
+ *   完全绕开窗口大小限制。
+ */
 static void rx_line_flush (void)
 {
     if (rx_line_len > 0U)
     {
         rx_line[rx_line_len] = '\0';
 
-        if (0 == strcmp(rx_line, "AUTO"))           /* 启动阶段1自动诊断 */
+        if (0 == strcmp(rx_line, "KEY"))            /* 立即打印两个键的原始电平 */
+        {
+            uint8_t k1 = 0U;
+            uint8_t k2 = 0U;
+
+            key_raw_levels(&k1, &k2);
+            printf("[KEY] P005 raw=%u  P006 raw=%u   (idle=1 1 / pressed=0)\r\n",
+                   (unsigned)k1, (unsigned)k2);
+            printf("[KEY] hold a key and type KEY again to see it change\r\n");
+        }
+        else if (0 == strcmp(rx_line, "HB"))        /* 立即打印一次心跳快照 */
+        {
+            weather_task_heartbeat_force();
+        }
+        else if (0 == strcmp(rx_line, "AUTO"))      /* 启动阶段1自动诊断 */
         {
             at_probe_start();
         }
@@ -378,6 +401,7 @@ void hal_entry(void)
     printf("\r\nRA E2STUDIO 4.weather_app  build %s %s\r\n", __DATE__, __TIME__);
     printf("USB input -> WIFI uart (auto CRLF), WIFI response back to USB\r\n");
     printf("Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop\r\n");
+    printf("Local: KEY = key pin levels now, HB = heartbeat snapshot now\r\n");
 
     at_engine_init();
     oled_port_init();
