@@ -371,7 +371,11 @@ void hal_entry(void)
     err = R_SCI_UART_Open(&g_wifi_uart_ctrl, &g_wifi_uart_cfg);
     assert(FSP_SUCCESS == err);
 
-    printf("\r\nRA E2STUDIO 4.weather_app\r\n");
+    /* ⚠ 编译时间/版本：每次改动后第一眼就能确认"烧的是不是最新固件"。
+     * 格式固定为 "2026-10-04 12:34:56"，可直接和 Git 提交时间对照。
+     * __DATE__ / __TIME__ 由编译器展开，改了源码就会变 —— 若烧录后
+     * 这行没变，说明烧的确实不是这版固件（这是排查过多次的问题）。 */
+    printf("\r\nRA E2STUDIO 4.weather_app  build %s %s\r\n", __DATE__, __TIME__);
     printf("USB input -> WIFI uart (auto CRLF), WIFI response back to USB\r\n");
     printf("Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop\r\n");
 

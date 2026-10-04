@@ -482,10 +482,13 @@ static void fetch_weather_done (void)
 {
     const weather_http_result_t * res = weather_http_result();
 
+    /* 无论成败都打一行, 且行首统一 [WX-RESULT]。
+     * 之前成功/失败用不同前缀([wx] OK: / [wx] fetch failed: / [wx] parse failed:),
+     * 排查时无法用单一关键字把"这次拉取的结果"grep 出来, 容易误判成没走到。 */
     if ((res->len <= 0) || (res->http_status != 200))
     {
-        printf("[wx] fetch failed: len=%d http=%d nw=%d err=%d\r\n",
-               res->len, res->http_status, res->nw_status, res->http_status);
+        printf("[WX-RESULT] FAIL http=%d nw=%d len=%d\r\n",
+               res->http_status, res->nw_status, res->len);
         return;
     }
 
@@ -494,7 +497,8 @@ static void fetch_weather_done (void)
 
         if (0 != weather_parse_now(body, &s.wx))
         {
-            printf("[wx] parse failed: %.60s\r\n", body);
+            printf("[WX-RESULT] PARSE-FAIL http=200 nw=%d len=%d body=%.60s\r\n",
+                   res->nw_status, res->len, body);
             return;
         }
     }
@@ -502,7 +506,7 @@ static void fetch_weather_done (void)
     s.wx_valid  = true;
     s.wx_age_ms = 0U;
     s.ui_dirty  = true;
-    printf("[wx] OK: %s %dC code=%d up=%s\r\n",
+    printf("[WX-RESULT] OK %s %dC code=%d up=%s\r\n",
            s.wx.text, s.wx.temperature, s.wx.code, s.wx.update);
 }
 
@@ -704,7 +708,8 @@ void weather_task_init (void)
 
     key_init();
     ui_init();
-    printf("[wx] task init\r\n");
+    printf("[wx] task init: boot %s %s, first step = NWIP query\r\n",
+           __DATE__, __TIME__);
 
     /* 用户要求: 每次开机先用 AT 命令测试模块, 再走后续联网/天气 */
     if (!at_send_owned("AT", 2000U, CMD_AT))
