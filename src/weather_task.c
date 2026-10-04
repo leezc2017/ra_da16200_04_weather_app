@@ -113,6 +113,7 @@ static struct {
 
     /* 心跳诊断(WEATHER_HB_DIAG_MS=0 时不打印) */
     uint32_t hb_t0;
+    uint32_t hb_fast;      /**< fetch 在途时的 1s 心跳时基 */
 } s;
 
 /* hal_entry.c 的诊断计数器(判断日志/数据是否被丢) */
@@ -733,6 +734,7 @@ void weather_task_init (void)
     s.ui_dirty   = true;
     s.cmd        = CMD_NONE;
     s.hb_t0      = at_engine_now_ms();
+    s.hb_fast    = s.hb_t0;
 
     key_init();
     ui_init();
@@ -988,6 +990,21 @@ void weather_task_poll (void)
         hb_print(now);
     }
 #endif
+
+    /* ---------- 5b. fetch 在途时的 1s 心跳（仅在途时才有） ----------
+     *
+     * 2026-10-04 排查依据：常规心跳 5s 一行，而 NWHTC 一旦在途就可能把
+     * 主循环拖住，5s 那行迟迟不来，无法区分"引擎停在哪个状态"和"只是没到点"。
+     * 所以在 weather_http 在途期间改成 1s 一行，直接看到引擎状态迁移：
+     *   eng=1 (SENDING) -> 发出去了，等 TX 完成
+     *   eng=2 (WAIT)    -> 命令已发出，等 +NWHTCSTATUS
+     *   eng=0 (IDLE)    -> 引擎已收口，下一步就是 [wx] http done
+     * 不在途时行为不变，仍是 WEATHER_HB_DIAG_MS（低频），不违反诊断低频原则。 */
+    if (weather_http_busy() && ((now - s.hb_fast) >= 1000U))
+    {
+        s.hb_fast = now;
+        hb_print(now);
+    }
 
     /* ---------- 6. 重绘 ---------- */
     if (s.ui_dirty)
