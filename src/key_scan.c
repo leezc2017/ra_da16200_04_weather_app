@@ -238,6 +238,19 @@ uint8_t key_event_pending (void)
     return s_fifo_cnt;
 }
 
+void key_raw_levels (uint8_t * out_k1, uint8_t * out_k2)
+{
+    if (NULL != out_k1)
+    {
+        /* 绕开 key_raw_read()：那里已按 ACTIVE_LOW 取反，这里要的是硬件原值 */
+        *out_k1 = (0U != R_BSP_PinRead(WEATHER_KEY_PIN))  ? 1U : 0U;
+    }
+    if (NULL != out_k2)
+    {
+        *out_k2 = (0U != R_BSP_PinRead(WEATHER_KEY2_PIN)) ? 1U : 0U;
+    }
+}
+
 void key_event_flush (void)
 {
     s_fifo_head = 0U;

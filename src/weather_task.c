@@ -129,7 +129,10 @@ extern volatile uint32_t wifi_rx_byte_cnt;
 static void hb_print (uint32_t now)
 {
     at_engine_diag_t d;
+    uint8_t k1 = 0U;
+    uint8_t k2 = 0U;
 
+    key_raw_levels(&k1, &k2);
     at_engine_diag(&d);
     /* ⚠ link= 这一段是"链路初始化进度"，排查"为什么没去拉天气"时最有用：
      *   tz/sntp/wx 三个 bit 依次点亮，cmd 是当前在途命令归属。
@@ -141,6 +144,7 @@ static void hb_print (uint32_t now)
      * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）。 */
     printf("[hb] %lus eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
            "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
+           "kraw=%u%u "
            "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
            (unsigned long)(now / 1000UL),
            d.state, d.mode, d.urc_cnt, d.seen_cnt,
@@ -150,6 +154,7 @@ static void hb_print (uint32_t now)
            (unsigned long)usb_tx_drop_cnt,
            (int)s.status,
            s.wx_valid ? s.wx.text : "--", s.wx_valid ? s.wx.temperature : 0,
+           (unsigned)k1, (unsigned)k2,
            (unsigned)(s.timezone_set ? 1U : 0U),
            (unsigned)(s.sntp_done    ? 1U : 0U),
            (unsigned)(s.wx_valid     ? 1U : 0U),

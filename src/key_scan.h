@@ -73,6 +73,20 @@ key_event_t key_event_get_id(key_id_t * out_id);
 uint8_t key_event_pending(void);
 
 /**
+ * @brief 取各机械键的**原始**引脚电平（1=高, 0=低）
+ *
+ * 为什么要原始值而不是归一化的"是否按下"：
+ * 归一化值受 ACTIVE_LOW 影响，出问题时无法区分"引脚没变"和"极性反了"。
+ * 原始值直接反映硬件，判读表：
+ *   空闲恒为 1（外部上拉），按下变 0
+ *   - 空闲就是 0  -> 引脚没上拉/被拉低/配置不对
+ *   - 按下仍是 1  -> 该引脚不接这个开关，或开关接触不良
+ *
+ * 用于心跳诊断（不依赖串口抓取窗口），阶段3 接入触摸后扩展为 4 路。
+ */
+void key_raw_levels(uint8_t * out_k1, uint8_t * out_k2);
+
+/**
  * @brief 清空 FIFO（切换页面或状态迁移时调用，避免旧事件误触发）
  */
 void key_event_flush(void);
