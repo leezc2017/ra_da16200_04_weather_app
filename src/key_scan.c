@@ -115,6 +115,12 @@ void key_init (void)
     s_fifo_head    = 0U;
     s_fifo_cnt     = 0U;
     memset(s_fifo, 0, sizeof(s_fifo));
+
+    /* ⚠ 不要在这里"顺手"打开内部上拉。
+     * IOPORT_CFG_PORT_DIRECTION_INPUT 本身不含上拉，但本板 P005/P006
+     * **硬件已有外部上拉**（用户已核对原理图确认），且 `[key] level now: k2=0`
+     * 说明 P006 空闲确实读到高电平 —— 上拉是好的，不需要软件再补。
+     * 内部上拉与外部上拉并联只会额外分流，无益于诊断。 */
     printf("[key] init 2 mech keys: P005(active_low=%d) P006(active_low=%d); "
            "touch TS11/TS12 in stage3\r\n",
            WEATHER_KEY_ACTIVE_LOW, WEATHER_KEY2_ACTIVE_LOW);
