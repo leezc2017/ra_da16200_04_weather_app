@@ -287,17 +287,31 @@
   </raModuleConfiguration>
   <raPinConfiguration>
     <pincfg active="true" name="R7FA4M2AD3CFP.pincfg" selected="true" symbol="g_bsp_pin_cfg">
+      <configSetting altId="ctsu0.mode.enabled" configurationId="ctsu0.mode"/>
+      <configSetting altId="ctsu0.ts11.p415" configurationId="ctsu0.ts11"/>
+      <configSetting altId="ctsu0.ts12.p708" configurationId="ctsu0.ts12"/>
+      <configSetting altId="ctsu0.tscap.p207" configurationId="ctsu0.tscap"/>
       <configSetting altId="debug0.mode.swd" configurationId="debug0.mode"/>
       <configSetting altId="debug0.swclk.p300" configurationId="debug0.swclk"/>
       <configSetting altId="debug0.swdio.p108" configurationId="debug0.swdio"/>
+      <configSetting altId="p005.input" configurationId="p005"/>
+      <configSetting altId="p005.gpio_mode.gpio_mode_in" configurationId="p005.gpio_mode"/>
+      <configSetting altId="p006.input" configurationId="p006"/>
+      <configSetting altId="p006.gpio_mode.gpio_mode_in" configurationId="p006.gpio_mode"/>
       <configSetting altId="p108.debug0.swdio" configurationId="p108"/>
       <configSetting altId="p108.gpio_mode.gpio_mode_peripheral" configurationId="p108.gpio_mode"/>
       <configSetting altId="p109.sci9.txd" configurationId="p109"/>
       <configSetting altId="p109.gpio_mode.gpio_mode_peripheral" configurationId="p109.gpio_mode"/>
       <configSetting altId="p110.sci9.rxd" configurationId="p110"/>
       <configSetting altId="p110.gpio_mode.gpio_mode_peripheral" configurationId="p110.gpio_mode"/>
+      <configSetting altId="p207.ctsu0.tscap" configurationId="p207"/>
+      <configSetting altId="p207.gpio_mode.gpio_mode_peripheral" configurationId="p207.gpio_mode"/>
       <configSetting altId="p300.debug0.swclk" configurationId="p300"/>
       <configSetting altId="p300.gpio_mode.gpio_mode_peripheral" configurationId="p300.gpio_mode"/>
+      <configSetting altId="p415.ctsu0.ts11" configurationId="p415"/>
+      <configSetting altId="p415.gpio_mode.gpio_mode_peripheral" configurationId="p415.gpio_mode"/>
+      <configSetting altId="p708.ctsu0.ts12" configurationId="p708"/>
+      <configSetting altId="p708.gpio_mode.gpio_mode_peripheral" configurationId="p708.gpio_mode"/>
       <configSetting altId="p410.sci0.rxd" configurationId="p410"/>
       <configSetting altId="p410.gpio_mode.gpio_mode_peripheral" configurationId="p410.gpio_mode"/>
       <configSetting altId="p411.sci0.txd" configurationId="p411"/>

@@ -739,33 +739,62 @@ void weather_task_poll (void)
 {
     uint32_t now = at_engine_now_ms();
 
-    /* ---------- 1. 按键（最先处理，保证任何状态下即时响应） ---------- */
+    /* ---------- 1. 按键（最先处理，保证任何状态下即时响应） ----------
+     * 映射按 DESIGN §6（板上 4 键 = 2 机械 + 2 触摸）：
+     *   机械键1 P005: 短按=刷新 / 双击=翻页 / 长按3s=配网(阶段4)
+     *   机械键2 P006: 单击=翻页
+     *   触摸键1 TS11: 单击=刷新        （阶段3 接入）
+     *   触摸键2 TS12: 单击=翻页/长按配网（阶段3 接入）
+     * 触摸键用 key_id_t 区分即可，本函数不需要改，阶段3 只要让
+     * key_scan 能报出 KEY_ID_TOUCH1/2 就能自动生效。 */
     key_poll(now);
     for (;;)
     {
-        key_event_t e = key_event_get();
+        key_id_t    id = KEY_ID_MECH1;
+        key_event_t e  = key_event_get_id(&id);
 
         if (KEY_EVT_NONE == e)
         {
             break;
         }
+
+        /* 机械键2 / 触摸键2：单击=翻页（不做三态，省一次双击等待） */
+        if ((KEY_ID_MECH2 == id) || (KEY_ID_TOUCH2 == id))
+        {
+            if (KEY_EVT_LONG == e)
+            {
+                printf("[wx] key%u: long -> provisioning (stage4)\r\n", (unsigned)id);
+                s.ui_dirty = true;
+            }
+            else
+            {
+                s.page ^= 1U;
+                printf("[wx] key%u: click -> page %u\r\n",
+                       (unsigned)id, (unsigned)s.page);
+                s.ui_dirty = true;
+            }
+            continue;
+        }
+
+        /* 机械键1 / 触摸键1：三态 */
         switch (e)
         {
             case KEY_EVT_SHORT:
-                printf("[wx] key: short -> refresh\r\n");
+                printf("[wx] key%u: short -> refresh\r\n", (unsigned)id);
                 s.ui_dirty = true;
                 (void)fetch_weather_start();
                 break;
 
             case KEY_EVT_DOUBLE:
                 s.page ^= 1U;
-                printf("[wx] key: double -> page %u\r\n", (unsigned)s.page);
+                printf("[wx] key%u: double -> page %u\r\n",
+                       (unsigned)id, (unsigned)s.page);
                 s.ui_dirty = true;
                 break;
 
             case KEY_EVT_LONG:
                 /* 阶段4 接配网；当前仅打印，不改状态机 */
-                printf("[wx] key: long (provisioning in stage4)\r\n");
+                printf("[wx] key%u: long -> provisioning (stage4)\r\n", (unsigned)id);
                 s.ui_dirty = true;
                 break;
 

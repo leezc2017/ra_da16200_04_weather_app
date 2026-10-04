@@ -28,16 +28,26 @@
 #define NTP_SERVER_2             "pool.ntp.org"
 
 /* ===================== 3.1 按键 ========================= */
-/* 阶段2 只接 1 个机械键（GPIOINPUT 示例读 P005）。
- * 触摸键留阶段3（DESIGN §6 的 4 键映射在阶段3 全接入）。
+/* 板上共 4 键 = 2 机械(GPIO) + 2 触摸(CTSU)，映射见 DESIGN §6。
  *
- * ⚠ P005 的输入模式/上拉由 FSP 侧配置：见 ra_gen/pin_data.c 的 g_pin_cfg。
- *   若按下无反应，先查该引脚是否配成输入 + 上拉，再调 WEATHER_KEY_ACTIVE_LOW。
- *   极性：1 = 按下为低电平(上拉式按钮)。 */
-#define WEATHER_KEY_PIN          BSP_IO_PORT_00_PIN_05      /* P005 */
-
-/** 1 = 按下为低电平(上拉) */
+ * 【阶段2】机械键 2 个，引脚参考 RA4M2GPIOINPUT demo：P005 / P006。
+ * 【阶段3】触摸键 2 个，引脚参考 RA4M2TOUCH demo：
+ *        TSCAP=P207, TS11=P415, TS12=P708 —— ⚠ 触摸是 CTSU 模拟外设，
+ *        **不能靠读 GPIO 电平**，必须 r_ctsu + rm_touch 扫描 + 逐通道标定。
+ *
+ * ⚠ 关键（2026-10-04 实测踩坑）：引脚**必须在 FSP 里配成 GPIO 输入**，
+ *   否则 R_BSP_PinRead 读到的是未定义电平，按键永远不触发 —— 当时
+ *   4 个键全部无反应，就是因为 configuration.xml 的 pincfg 里只有 6 个
+ *   外设引脚(P108/P109/P110/P300/P410/P411)，没有 P005/P006。
+ *   现已在 configuration.xml 与 ra_gen/pin_data.c 两处补上。
+ *
+ * 极性：1 = 按下为低电平(上拉式按钮)。若某个键按下反而触发，翻转该键的
+ *      ACTIVE_LOW 即可，不必改公共逻辑。 */
+#define WEATHER_KEY_PIN          BSP_IO_PORT_00_PIN_05      /* 机械键1 */
 #define WEATHER_KEY_ACTIVE_LOW   1
+
+#define WEATHER_KEY2_PIN         BSP_IO_PORT_00_PIN_06      /* 机械键2 */
+#define WEATHER_KEY2_ACTIVE_LOW  1
 
 /** 按键时序(ms) */
 #define KEY_POLL_MS              20U      /* 轮询周期 */

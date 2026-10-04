@@ -16,13 +16,22 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/** 按键事件类型 */
+/** 按键事件类型（不带键号；键号由 key_event_get_id() 单独给出） */
 typedef enum {
     KEY_EVT_NONE = 0,    /**< 无事件 */
     KEY_EVT_SHORT,       /**< 短按 */
     KEY_EVT_DOUBLE,      /**< 双击 */
     KEY_EVT_LONG,        /**< 长按 */
 } key_event_t;
+
+/** 按键编号（映射见 DESIGN §6） */
+typedef enum {
+    KEY_ID_MECH1 = 0,    /**< 机械键1 P005: 短按=刷新 / 双击=翻页 / 长按=配网 */
+    KEY_ID_MECH2 = 1,    /**< 机械键2 P006: 单击=翻页 */
+    KEY_ID_TOUCH1 = 2,   /**< 触摸键1 TS11: 单击=刷新      （阶段3 接入） */
+    KEY_ID_TOUCH2 = 3,   /**< 触摸键2 TS12: 单击=翻页/长按配网（阶段3 接入） */
+    KEY_ID_MAX
+} key_id_t;
 
 /** 事件 FIFO 深度（≥4，满足 §8.1 验收的连按不丢） */
 #define KEY_EVT_FIFO_DEPTH   8U
@@ -46,6 +55,16 @@ void key_poll(uint32_t now_ms);
  * @return 事件类型；无事件返回 KEY_EVT_NONE
  */
 key_event_t key_event_get(void);
+
+/**
+ * @brief 取一个事件并带出按键编号（推荐用这个做映射）
+ *
+ * 事件入队时会把 key_id_t 一起存下，所以 4 键共用一个 FIFO 也能区分来源。
+ *
+ * @param out_id 输出按键编号（KEY_ID_MECH1 / KEY_ID_MECH2 / ...）
+ * @return 事件类型；无事件返回 KEY_EVT_NONE
+ */
+key_event_t key_event_get_id(key_id_t * out_id);
 
 /**
  * @brief 查询 FIFO 中待处理事件数
