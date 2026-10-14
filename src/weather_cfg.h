@@ -40,8 +40,9 @@
  *
  * 【阶段2】机械键 2 个，引脚参考 RA4M2GPIOINPUT demo：P005 / P006。
  * 【阶段3】触摸键 2 个，引脚参考 RA4M2TOUCH demo：
- *        TSCAP=P207, TS11=P415, TS12=P708 —— ⚠ 触摸是 CTSU 模拟外设，
- *        **不能靠读 GPIO 电平**，必须 r_ctsu + rm_touch 扫描 + 逐通道标定。
+  *        TSCAP=P207, TS11=P415, TS12=P708 —— ⚠ 触摸是 CTSU 模拟外设，
+ *        **不能靠读 GPIO 电平**，必须启用 FSP r_ctsu + rm_touch 和 QE 标定。
+ *        当前 pin mux 已配置，但此工程尚未集成 touch instance/IRQ/scanner，触摸键未生效。
  *
  * ⚠ 关键（2026-10-04 实测踩坑）：引脚**必须在 FSP 里配成 GPIO 输入**，
  *   否则 R_BSP_PinRead 读到的是未定义电平，按键永远不触发 —— 当时

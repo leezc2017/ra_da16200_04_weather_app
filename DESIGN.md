@@ -132,7 +132,7 @@ at_result_t at_engine_poll(void);       /* 每 tick 调用，非阻塞 */
 - ~~RTC~~：**用户已确认不需要**；主页显示 IP 定位城市、实时天气/温度/湿度/风速、今日高低温和时间，WiFi 页显示 SSID/IP/状态。当前 `WEATHER_UI_SERIAL_SIM=1` 时以四行串口文本模拟 128×32 OLED，并跳过 OLED 硬件初始化；真实 OLED 路径由该配置关闭后启用。时间来源见 §5 对时行
 - **按键：板上共 4 个（2 机械 + 2 触摸）**
   - 2 个机械键：`RA4M2GPIOINPUT` 示例读 **P005/P006**（极性/上拉实现时按原理图或实测确认）
-  - 2 个触摸键：`RA4M2TOUCH` 示例完整模板（FSP CTSU + RM_TOUCH 中间件，`qe_gen/` 生成物齐全，电极引脚 P300/P415/P708 系，`button_status` 1/2 两键），可直接拷贝配置
+  - 2 个触摸键：`RA4M2TOUCH` 示例使用 FSP CTSU + RM_TOUCH 中间件，电极为 TSCAP=P207、TS11=P415、TS12=P708；`button_status` bit0/bit1 对应两键
   - **按键映射（已确认 4 键全接入，建议如下，可微调）**：
 
     | 按键 | 功能 |
@@ -157,11 +157,13 @@ humidity/wind_speed 字段补齐（只覆盖实际返回的非负值）。UI 的
 命令忙时排队，成功投递后才清除 pending 标志。
 
 触摸键 TS11/TS12 不能按 GPIO 读。P207/P415/P708 pin mux 已配置，但当前天气工程尚未
-启用 CTSU + `rm_touch` middleware、IRQ、实例及扫描状态机。接入时须使用
-`RA4M2TOUCH` 示例的 QE Touch 配置（两电极状态位 bit0/bit1），将触摸边沿转换成与
-机械键相同的 `key_event` FIFO；不能同步忙等扫描完成。
+启用 CTSU + `rm_touch` middleware、IRQ、实例及扫描状态机，故触摸目前没有按键事件。
+本机只找到 FSP 4.0 的 `RA4M2TOUCH` 示例；当前工程使用 FSP 6.6，而对应
+`r_ctsu`/`rm_touch` 源码未安装在 workspace/toolchain 目录。接入前需在 RASC 6.6 中添加
+CTSU/RM_TOUCH，生成 FSP 6.6 实例及中断，再将触摸边沿（两个电极状态 bit0/bit1）转换成
+与机械键相同的 `key_event` FIFO。扫描必须非阻塞，不能在主循环同步忙等 CTSU 完成。
 
-### 6.1 板载 LED 状态定义
+### 6.2 板载 LED 状态定义
 
 | LED | MCU 引脚 | 含义 | 表现 |
 |---|---|---|---|
@@ -175,7 +177,7 @@ humidity/wind_speed 字段补齐（只覆盖实际返回的非负值）。UI 的
 节拍运行，不用作精密时基。网络一旦曾连上，断线重连期间 LED1 会熄灭，重新进入
 CONNECTING 后闪烁。
 
-### 6.2 主栈配置与已知 HardFault 根因
+### 6.3 主栈配置与已知 HardFault 根因
 
 RA4M2 的裸机主栈由 `configuration.xml` 的 `config.bsp.common.main` 配置；当前为
 `0x1000`（4 KB），RASC 生成值在 `ra_cfg/fsp_cfg/bsp/bsp_cfg.h`。不要只手改生成头文件。
