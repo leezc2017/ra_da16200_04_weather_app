@@ -144,6 +144,23 @@ at_result_t at_engine_poll(void);       /* 每 tick 调用，非阻塞 */
   - 触摸键接入注意：需把 `RA4M2TOUCH` 的 CTSU 外设配置合并进本工程 configuration.xml（`hal_data`/`pin_data` 同步），此一步**可能需要 e2studio 打开生成一次**——阶段3 先评估"手工合并 vs e2studio 一次配置"，评估结论回报后再动
 - 板载 LED：P044/P045/P002（可作状态指示）
 
+### 6.1 按键刷新与未联网行为
+
+机械键 P005 短按请求天气刷新、双击翻页、长按 3 秒为配网入口；P006 单击翻页。
+扫描和事件消费每个主循环 tick 都执行，不依赖 Wi-Fi 已连接。短按刷新在未联网或 AT
+命令忙时排队，待联网且命令空闲后执行，不静默丢弃。GD32 参考版同样先设置 refresh
+请求标志，再由网络任务在连接后消费，因此启动/断网期间按键仍应有效。
+
+天气 `now.json` 的湿度/风速可能缺失；解析器保留 -1，由 `daily.json` 今日
+humidity/wind_speed 字段补齐（只覆盖实际返回的非负值）。UI 的 `--` 表示两份
+响应均未提供该指标，不代表 JSON 或天气请求失败。手动刷新在 Wi-Fi 未连接或 AT
+命令忙时排队，成功投递后才清除 pending 标志。
+
+触摸键 TS11/TS12 不能按 GPIO 读。P207/P415/P708 pin mux 已配置，但当前天气工程尚未
+启用 CTSU + `rm_touch` middleware、IRQ、实例及扫描状态机。接入时须使用
+`RA4M2TOUCH` 示例的 QE Touch 配置（两电极状态位 bit0/bit1），将触摸边沿转换成与
+机械键相同的 `key_event` FIFO；不能同步忙等扫描完成。
+
 ### 6.1 板载 LED 状态定义
 
 | LED | MCU 引脚 | 含义 | 表现 |

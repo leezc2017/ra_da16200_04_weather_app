@@ -9,6 +9,19 @@
 #include "cJSON.h"
 #include "weather_parse.h"
 
+static int json_int_or_missing(const cJSON *item)
+{
+    if (cJSON_IsNumber(item))
+    {
+        return item->valueint;
+    }
+    if (cJSON_IsString(item) && (NULL != item->valuestring))
+    {
+        return atoi(item->valuestring);
+    }
+    return -1;
+}
+
 int weather_parse_now(const char *body, weather_data_t *out)
 {
     if (body == NULL || out == NULL) {
@@ -53,15 +66,9 @@ int weather_parse_now(const char *body, weather_data_t *out)
         cJSON *feel = cJSON_GetObjectItem(now, "feels_like");
         cJSON *humidity = cJSON_GetObjectItem(now, "humidity");
         cJSON *wind = cJSON_GetObjectItem(now, "wind_speed");
-        if (feel && cJSON_GetStringValue(feel)) {
-            parsed.feels_like = atoi(feel->valuestring);
-        }
-        if (humidity && cJSON_GetStringValue(humidity)) {
-            parsed.humidity = atoi(humidity->valuestring);
-        }
-        if (wind && cJSON_GetStringValue(wind)) {
-            parsed.wind_speed = atoi(wind->valuestring);
-        }
+        parsed.feels_like = json_int_or_missing(feel);
+        parsed.humidity = json_int_or_missing(humidity);
+        parsed.wind_speed = json_int_or_missing(wind);
 
         cJSON *up = cJSON_GetObjectItem(root, "last_update");
         if (up && up->valuestring) {
@@ -109,8 +116,18 @@ int weather_parse_daily(const char *body, weather_data_t *out)
         out->high = atoi(high->valuestring);
         out->low = atoi(low->valuestring);
 
-        /* Keep humidity and wind_speed from now.json for the live conditions
-         * shown on the GD32-style main page; daily data supplies only the range. */
+        /* The daily endpoint also returns humidity and wind_speed. Keep the
+         * now.json values as fallback, and replace them when daily has values. */
+        cJSON *humidity = cJSON_GetObjectItem(d0, "humidity");
+        cJSON *wind = cJSON_GetObjectItem(d0, "wind_speed");
+        int humidity_value = json_int_or_missing(humidity);
+        int wind_value = json_int_or_missing(wind);
+        if (humidity_value >= 0) {
+            out->humidity = humidity_value;
+        }
+        if (wind_value >= 0) {
+            out->wind_speed = wind_value;
+        }
         out->daily_valid = 1U;
         ret = 0;
     } while (0);
@@ -142,9 +159,18 @@ static const char SELFTEST_BODY[] =
     "\"now\":{\"text\":\"\xe6\x99\xb4\",\"code\":\"0\",\"temperature\":\"18\"}}],"
     "\"last_update\":\"2026-10-04T11:34:41+08:00\"}";
 
+static const char METRICS_SELFTEST_NOW[] =
+    "{\"results\":[{\"now\":{\"text\":\"Foggy\",\"code\":\"5\","
+    "\"temperature\":\"16\",\"humidity\":65,\"wind_speed\":12}}]}";
+
+static const char METRICS_SELFTEST_DAILY[] =
+    "{\"results\":[{\"daily\":[{\"high\":\"21\",\"low\":\"11\","
+    "\"humidity\":70,\"wind_speed\":14}]}]}";
+
 bool weather_parse_selftest(char * out_buf, uint16_t size)
 {
     weather_data_t w;
+    weather_data_t metrics;
     int r;
 
     if ((NULL == out_buf) || (0U == size))
@@ -172,7 +198,19 @@ bool weather_parse_selftest(char * out_buf, uint16_t size)
         return false;
     }
 
-    snprintf(out_buf, size, "code=%d temp=%d text=%s(up=%uB)",
-             w.code, w.temperature, w.update, (unsigned)sizeof(SELFTEST_BODY) - 1U);
+    memset(&metrics, 0, sizeof(metrics));
+    if ((0 != weather_parse_now(METRICS_SELFTEST_NOW, &metrics)) ||
+        (65 != metrics.humidity) || (12 != metrics.wind_speed) ||
+        (0 != weather_parse_daily(METRICS_SELFTEST_DAILY, &metrics)) ||
+        (70 != metrics.humidity) || (14 != metrics.wind_speed) ||
+        (21 != metrics.high) || (11 != metrics.low))
+    {
+        snprintf(out_buf, size, "metric fields now/daily parse failed");
+        return false;
+    }
+
+    snprintf(out_buf, size, "code=%d temp=%d hum=%d wind=%d text=%s(up=%uB)",
+             w.code, w.temperature, metrics.humidity, metrics.wind_speed, w.update,
+             (unsigned)sizeof(SELFTEST_BODY) - 1U);
     return true;
 }

@@ -119,6 +119,7 @@ static struct {
     bool    sntp_done;          /**< AT+NWSNTP 已投递 */
     bool    time_check_pending;  /**< SNTP 后延时验证 AT+TIME */
     uint32_t time_check_due_ms;  /**< SNTP 后验证时间的截止时刻 */
+    bool    refresh_pending;     /**< 按键请求的刷新，网络不可用时保留 */
     uint8_t tz_fail;            /**< TZONE 连续失败次数, 到 TZ_MAX_FAIL 就不再堵链路 */
     char    time_str[6];        /**< 最近一次 AT+TIME 的 "HH:MM" */
 
@@ -341,7 +342,7 @@ static void hb_print (uint32_t now)
      * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）。 */
      printf("[hb] up=%lus fsec=%us eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
             "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
-            "kraw=%u%u res=%s/%d loop=%lu stage=%u wrx=%lu urx=%lu wtx=%lu "
+            "kraw=%u%u res=%s/%d rq=%u loop=%lu stage=%u wrx=%lu urx=%lu wtx=%lu "
             "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
            (unsigned long)(now / 1000UL),
            /* fsec= 本次 fetch 已等秒数(不在途时为 0)。2026-10-04 加:
@@ -357,6 +358,7 @@ static void hb_print (uint32_t now)
            s.wx_valid ? s.wx.text : "--", s.wx_valid ? s.wx.temperature : 0,
             (unsigned)k1, (unsigned)k2,
             weather_task_last_result(), s_wxr.http,
+            (unsigned)(s.refresh_pending ? 1U : 0U),
             (unsigned long)diag_main_loops, (unsigned)diag_main_stage,
             (unsigned long)diag_wifi_rx_processed,
             (unsigned long)diag_usb_rx_processed,
@@ -735,8 +737,9 @@ static bool fetch_weather_now_done (void)
     s.wx = parsed;
     s.wx_valid = true;
     s.ui_dirty = true;
-    printf("[WX-NOW] %s %dC code=%d up=%s\r\n",
-           s.wx.text, s.wx.temperature, s.wx.code, s.wx.update);
+    printf("[WX-NOW] %s %dC code=%d humidity=%d wind=%d up=%s\r\n",
+           s.wx.text, s.wx.temperature, s.wx.code, s.wx.humidity,
+           s.wx.wind_speed, s.wx.update);
     return true;
 }
 
@@ -783,7 +786,8 @@ static void fetch_weather_daily_done (void)
     } else if (weather_parse_daily(weather_http_body(NULL), &s.wx) != 0) {
         printf("[WX-DAILY] parse failed len=%d\r\n", res->len);
     } else {
-        printf("[WX-DAILY] high=%dC low=%dC\r\n", s.wx.high, s.wx.low);
+        printf("[WX-DAILY] high=%dC low=%dC humidity=%d wind=%d\r\n",
+               s.wx.high, s.wx.low, s.wx.humidity, s.wx.wind_speed);
     }
 
     /* Daily data is optional: keep a successful now.json result if this call fails. */
@@ -1116,10 +1120,9 @@ void weather_task_init (void)
 
 void weather_task_refresh_now (void)
 {
-    if (fetch_weather_start())
-    {
-        printf("[wx] manual refresh issued\r\n");
-    }
+    s.refresh_pending = true;
+    s.ui_dirty = true;
+    printf("[wx] weather refresh queued\r\n");
 }
 
 wifi_status_t weather_task_wifi_status (void)
@@ -1177,9 +1180,9 @@ void weather_task_poll (void)
         switch (e)
         {
             case KEY_EVT_SHORT:
-                printf("[wx] key%u: short -> refresh\r\n", (unsigned)id);
+                printf("[wx] key%u: short -> queue weather refresh\r\n", (unsigned)id);
+                s.refresh_pending = true;
                 s.ui_dirty = true;
-                (void)fetch_weather_start();
                 break;
 
             case KEY_EVT_DOUBLE:
@@ -1290,6 +1293,8 @@ void weather_task_poll (void)
                        (unsigned)s.wifi_step, (unsigned)s.wifi_try);
             }
             s.connect_t0 = now;
+            s.status = WIFI_STAT_CONNECTING;
+            s.ui_dirty = true;
 
             switch (s.wifi_step)
             {
@@ -1369,15 +1374,25 @@ void weather_task_poll (void)
     /* ---------- 4. 命令调度（仅在引擎空闲时, 优先级从高到低） ---------- */
     if (at_engine_idle() && !weather_http_busy())
     {
-        /* 4a. 天气到点刷新 */
-        if (s.wx_valid && (s.wx_age_ms >= (uint32_t)WEATHER_REFRESH_MIN * 60000U))
+        /* 4a. Explicit queued refresh (key/API) takes precedence over periodic fetch. */
+        if (s.refresh_pending)
+        {
+            if (s.status == WIFI_STAT_CONNECTED && (CMD_NONE == s.cmd) &&
+                fetch_weather_start())
+            {
+                s.refresh_pending = false;
+                printf("[wx] queued key refresh issued\r\n");
+            }
+        }
+        /* 4b. Weather refresh due */
+        else if (s.wx_valid && (s.wx_age_ms >= (uint32_t)WEATHER_REFRESH_MIN * 60000U))
         {
             if (fetch_weather_start())
             {
                 s.wx_age_ms = 0U;
             }
         }
-        /* 4b. 联网后初始化链路: 查 IP -> 设时区 -> SNTP */
+        /* 4c. 联网后初始化链路: 查 IP -> 设时区 -> SNTP */
         else if (s.status == WIFI_STAT_CONNECTED)
         {
             if (s.time_check_pending)
@@ -1419,7 +1434,7 @@ void weather_task_poll (void)
                 }
             }
         }
-        /* 4c. 定时查时间 */
+        /* 4d. 定时查时间 */
         else if ((CMD_NONE == s.cmd) && ((now - s.time_poll_ms) >= WEATHER_TIME_POLL_MS))
         {
             s.time_poll_ms = now;

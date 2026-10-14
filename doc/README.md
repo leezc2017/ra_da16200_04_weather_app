@@ -6,6 +6,7 @@
 
 - **当前状态（阶段2，串口 OLED 模拟）**：已实测 Wi-Fi、SNTP/AT+TIME、now/daily HTTP 200、JSON 解析和持续心跳；天气状态机使用固定 Wi-Fi 凭据，心知天气按 `location=ip` 获取。主页与 Wi-Fi 信息页通过 USB 串口输出 128×32 OLED 四行内容。真实 OLED 未连接时跳过 OLED 初始化。
 - **NTP 配置**：主服务器为 `ntp.aliyun.com`，备用 `pool.ntp.org`。模块返回 NWSNTP `OK` 后等待 8 秒，再查询 `AT+TIME` 验证；时间查询完成后开始天气 HTTP 请求。
+- **天气指标与按键**：now JSON 的可选 humidity/wind_speed 若缺失，会尝试使用 daily JSON 同名字段补齐；仍为 `--` 表示两次响应都没提供值。P005 短按在未联网/AT 忙时排队，联网后执行；P005 双击和 P006 单击翻页。触摸键目前尚未接入 CTSU 扫描。
 - **板载 LED**：LED1/P045 联网中约 200 ms 节拍闪烁、连接成功常亮；LED2/P044 天气请求中闪烁、天气有效后常亮；LED3/P002 在联网/天气请求活动期间熄灭，空闲时慢速呼吸（约 2 秒周期）。GPIO 高电平点亮，固件运行时配置。
 - **RA 主栈**：`configuration.xml` 中 `config.bsp.common.main=0x1000`（4 KB）。2026-10-14 曾观察到 1 KB 栈版本在天气 UI 路径发生 INVSTATE HardFault，PC 落入主栈区；4 KB 版本已实测跑通 SNTP、now/daily HTTP 200、解析并持续心跳。栈配置应通过 RASC 生成，不要只改 `bsp_cfg.h`。
 - **状态诊断**：`[hb] eng=0` 表示 AT 引擎闲置，此时 `mode=0`；`loop/stage/wrx/urx/wtx` 分别是主循环次数、最近主循环阶段、已处理 Wi‑Fi/USB RX 字节和 Wi‑Fi TX 完成次数。若发生 Cortex-M Fault，现场保存在 `.ram_noinit`，硬件 RESET 后可打印 `[FAULT]`；彻底断电不保证保留。
