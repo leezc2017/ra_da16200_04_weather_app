@@ -260,8 +260,8 @@ static const char * city_or_ip (void)
 static const char * url_now (char * buf, uint16_t size)
 {
     snprintf(buf, size,
-             "http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=zh-Hans",
-             WEATHER_API_KEY, city_or_ip());
+             "http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=%s",
+             WEATHER_API_KEY, city_or_ip(), WEATHER_LANG);
     return buf;
 }
 
@@ -269,8 +269,8 @@ static const char * url_now (char * buf, uint16_t size)
 static const char * url_daily (char * buf, uint16_t size)
 {
     snprintf(buf, size,
-             "http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=zh-Hans",
-             WEATHER_API_KEY, city_or_ip());
+             "http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=%s",
+             WEATHER_API_KEY, city_or_ip(), WEATHER_LANG);
     return buf;
 }
 

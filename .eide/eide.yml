@@ -1,0 +1,195 @@
+version: "4.1"
+name: 4.weather_app
+type: ARM
+deviceName: null
+packDir: null
+srcDirs:
+  - ra
+  - ra_gen
+  - src
+virtualFolder:
+  name: <virtual_root>
+  files: []
+  folders: []
+dependenceList: []
+outDir: build
+miscInfo:
+  uid: dbdfb4b788725595244c883603dd8d5c
+targets:
+  Debug:
+    cppPreprocessAttrs:
+      defineList:
+        - _RENESAS_RA_
+        - _RA_CORE=CM33
+        - _RA_ORDINAL=1
+      incList:
+        - ra_cfg/fsp_cfg/bsp
+        - .
+        - ra_gen
+        - ra_cfg/fsp_cfg
+        - src
+        - ra/fsp/inc
+        - ra/fsp/inc/api
+        - ra/fsp/inc/instances
+        - ra/arm/CMSIS_6/CMSIS/Core/Include
+        - Debug
+      libList:
+        - ${workspace_loc:/.}/script
+    excludeList: []
+    settings: {}
+    toolchain: GCC
+    toolchainConfigMap:
+      GCC:
+        archExtensions: ""
+        cpuType: Cortex-M33
+        floatingPointHardware: single
+        options:
+          version: 5
+          afterBuildTasks: []
+          asm-compiler:
+            ASM_FLAGS: -D_RENESAS_RA_ -D_RA_CORE=CM33 -D_RA_ORDINAL=1
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            CXX_FLAGS: ""
+            C_FLAGS: -Wno-stringop-overflow -Wno-format-truncation --param=min-pagesize=0
+            language-c: c99
+            language-cpp: c++11
+            one-elf-section-per-data: true
+            one-elf-section-per-function: true
+            optimization: level-2
+            signed-char: true
+            warnings: all-warnings
+          global:
+            $float-abi-type: hard
+            misc-control:
+              - -fmessage-length=0
+              - -fno-strict-aliasing
+              - -Wunused
+              - -Wuninitialized
+              - -Wall
+              - -Wextra
+              - -Wmissing-declarations
+              - -Wconversion
+              - -Wpointer-arith
+              - -Wshadow
+              - -Wlogical-op
+              - -Waggregate-return
+              - -Wfloat-equal
+            not-use-syscalls: true
+            output-debug-info: enable
+            use-newlib-nano: true
+          linker:
+            $outputTaskExcludes:
+              - .bin
+            LD_FLAGS: -L Debug
+            LIB_FLAGS: ""
+            output-format: elf
+            remove-unused-input-sections: true
+        scatterFilePath: script/fsp.ld
+        storageLayout:
+          RAM: []
+          ROM: []
+        useCustomScatterFile: true
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: "null"
+          vendor: "null"
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+      pyOCD:
+        baseAddr: "0x08000000"
+        bin: ""
+        config: .eide/debug.pyocd.yaml
+        otherCmds: --uid <probe-uid>
+        speed: "4000"
+        targetName: r7fa4m2ad
+    uploader: pyOCD
+  Release:
+    cppPreprocessAttrs:
+      defineList:
+        - _RENESAS_RA_
+        - _RA_CORE=CM33
+        - _RA_ORDINAL=1
+      incList:
+        - ra_cfg/fsp_cfg/bsp
+        - .
+        - ra_gen
+        - ra_cfg/fsp_cfg
+        - src
+        - ra/fsp/inc
+        - ra/fsp/inc/api
+        - ra/fsp/inc/instances
+        - ra/arm/CMSIS_6/CMSIS/Core/Include
+        - Debug
+      libList:
+        - ${workspace_loc:/.}/script
+    excludeList: []
+    settings: {}
+    toolchain: GCC
+    toolchainConfigMap:
+      GCC:
+        archExtensions: ""
+        cpuType: Cortex-M33
+        floatingPointHardware: single
+        options:
+          version: 5
+          afterBuildTasks: []
+          asm-compiler:
+            ASM_FLAGS: -D_RENESAS_RA_ -D_RA_CORE=CM33 -D_RA_ORDINAL=1
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            CXX_FLAGS: ""
+            C_FLAGS: -Wno-stringop-overflow -Wno-format-truncation --param=min-pagesize=0
+            language-c: c99
+            language-cpp: c++11
+            one-elf-section-per-data: true
+            one-elf-section-per-function: true
+            optimization: level-2
+            signed-char: true
+            warnings: all-warnings
+          global:
+            $float-abi-type: hard
+            misc-control:
+              - -fmessage-length=0
+              - -fno-strict-aliasing
+              - -Wunused
+              - -Wuninitialized
+              - -Wall
+              - -Wextra
+              - -Wmissing-declarations
+              - -Wconversion
+              - -Wpointer-arith
+              - -Wshadow
+              - -Wlogical-op
+              - -Waggregate-return
+              - -Wfloat-equal
+            not-use-syscalls: true
+            output-debug-info: enable
+            use-newlib-nano: true
+          linker:
+            $outputTaskExcludes:
+              - .bin
+            LD_FLAGS: -L Debug
+            LIB_FLAGS: ""
+            output-format: elf
+            remove-unused-input-sections: true
+        scatterFilePath: script/fsp.ld
+        storageLayout:
+          RAM: []
+          ROM: []
+        useCustomScatterFile: true
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: "null"
+          vendor: "null"
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+    uploader: JLink

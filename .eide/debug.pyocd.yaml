@@ -1,0 +1,22 @@
+# pyOCD session config for 4.weather_app
+#
+# Used by EIDE's pyOCD flasher via the `config` field in
+# .eide/eide.yml -> uploadConfigMap.pyOCD.config
+#
+# Why probe-specific options are needed:
+#   This machine has more than one CMSIS-DAP probe attached at times
+#   (WCH-Link <probe-uid> and a GD32 probe). Without pinning the
+#   UID, pyOCD shows an interactive probe picker, which cannot work
+#   when launched by a GUI that does not feed stdin.
+#
+# Ref: https://pyocd.io/docs/target_support.html
+
+# Probe-specific: pin the exact probe so pyOCD never asks.
+probes:
+  <probe-uid>:
+    target_override: r7fa4m2ad
+
+# Global options
+auto_unlock: false
+frequency: 4000000
+persist: false
