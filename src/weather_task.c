@@ -1182,6 +1182,18 @@ void weather_task_poll (void)
             case KEY_EVT_SHORT:
                 printf("[wx] key%u: short -> queue weather refresh\r\n", (unsigned)id);
                 s.refresh_pending = true;
+                if (WIFI_STAT_FAIL == s.status)
+                {
+                    /* A queued refresh must be able to recover a terminal
+                     * connection failure instead of waiting forever. */
+                    s.status = WIFI_STAT_CONNECTING;
+                    s.wifi_step = WIFI_STEP_NWIP_QUERY;
+                    s.wifi_try = 0U;
+                    s.connect_t0 = now;
+                    s.ladder_sig = 0xFFFFU;
+                    s.ui_dirty = true;
+                    printf("[wx] key refresh restarts Wi-Fi connection ladder\r\n");
+                }
                 s.ui_dirty = true;
                 break;
 
