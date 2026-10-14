@@ -12,11 +12,20 @@ typedef struct {
     char     text[32];      /* 天气现象: "Sunny" */
     int      code;          /* 天气代码 0~38 */
     int      temperature;   /* °C */
+    int      feels_like;    /* 体感温度；未返回时为 -1 */
+    int      humidity;      /* 湿度百分比；未返回时为 -1 */
+    int      wind_speed;    /* 风速 km/h；未返回时为 -1 */
+    int      high;          /* 今日最高温；未返回时为 -1 */
+    int      low;           /* 今日最低温；未返回时为 -1 */
+    uint8_t  daily_valid;   /* 今日预报是否成功解析 */
     char     update[24];    /* last_update: "2024-05-01T12:00:00+08:00" */
 } weather_data_t;
 
 /* 从 body 提取 results[0].now + last_update, 成功返回 0 */
 int weather_parse_now(const char *body, weather_data_t *out);
+
+/* 将 daily.json 的今日预报合并到已有天气数据；成功返回 0。 */
+int weather_parse_daily(const char *body, weather_data_t *out);
 
 /**
  * @brief 解析器离线自检：拿一份**实测抓到的真实响应**跑一遍解析

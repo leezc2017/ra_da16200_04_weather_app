@@ -6,6 +6,7 @@
 #include "at_engine.h"
 #include "at_probe.h"
 #include "oled_port.h"
+#include "weather_cfg.h"
 #include "oled/oled.h"
 #include "oled/oled_font.h"
 #include "weather_text.h"
@@ -15,6 +16,34 @@
 #include "key_scan.h"
 
 #define TICK_MS          (10U)       /* 主循环节拍 */
+
+/* 主循环阶段标记: 定位死锁用的探针（设计意图是"主循环冻结时, 最后打出的那个字母
+ * 就是上一次到达但没返回的调用"）。
+ *
+ * ⚠ 2026-10-12 默认关闭 —— 这就是串口日志里那串垃圾字符的真正来源，不是串口噪声、
+ *   也不是 TX 环形缓冲出错。现场取证链：
+ *     1) 抓包里出现严格 7 字节周期 `.UWTKXD` (0x2E 55 57 54 4B 58 44)；
+ *     2) 全部 67 段突发的长度**无一例外**是 7 的倍数，同长度的两段逐字节相同
+ *        —— 说明是同一条固定序列被重复吐出，不是随机噪声；
+ *     3) 该模式在 ELF 全文 0 次命中 —— 它不是 .rodata 里的常量，
+ *        只能是主循环每轮 putchar 一次动态产生的。
+ *   代价量化：TICK_MS=10ms => 主循环 100 次/秒，每轮 7 字符 => 约 7000 字节/秒。
+ *   115200 8N1 的理论上限是 11520 字节/秒，也就是**约 61% 的链路带宽被标记吃掉**，
+ *   真正的日志被挤到只剩不到四成。
+ *
+ *   注意一个会误导人的现象：usb_tx_drop_cnt 全程都是 0。因为 7KB/s 并没有超过
+ *   环形缓冲的排空速率，缓冲不会满，所以"一个字节都没丢"这个指标**完全掩盖了
+ *   带宽被吃掉的事实**。只看 drop 计数是查不出这个问题的。
+ *
+ * 复现死锁定位时把它改回 1U，并且必须同时把 TICK_MS 调大（如 100ms），
+ * 否则标记本身就能灌满串口，把真正的故障现场盖掉。 */
+#define CPU_STAGE_MARKERS (0U)
+
+#if CPU_STAGE_MARKERS
+#define STAGE_MARK(c)     putchar(c)
+#else
+#define STAGE_MARK(c)     ((void)0)
+#endif
 #define USB_TX_RING_SIZE  (4096U)     /* USB TX 环形缓冲: printf 入队, 主循环泵发, 不阻塞 */
 #define RX_RING_SIZE      (8192U)     /* WIFI RX 环形缓冲: 容 2KB+ 突发(WFSCAN 实测 ~1.9KB) */
 #define RX_LINE_MAX       (256U)      /* 单行最大长度 */
@@ -467,17 +496,22 @@ void hal_entry(void)
     printf("       WXTEST = parse the real seniverse body offline (no network)\r\n");
 
     at_engine_init();
+#if WEATHER_UI_SERIAL_SIM
+    printf("[OLED] hardware init skipped; serial simulation enabled\r\n");
+#else
     oled_port_init();
+#endif
     weather_task_init();                      /* 阶段2: 天气主状态机 */
 
     while (1)
     {
-        /* 先搬 RX 再延时: 缩短字节在环里的驻留时间, 避免突发响应丢字节 */
-        usb_uart_rx_process();               /* USB 输入转发给 WIFI 串口 */
-        wifi_uart_rx_process();              /* WIFI 返回打印到 USB */
-        usb_tx_pump();                       /* 泵发 USB TX 环(非阻塞打印的兑现点) */
+        /* 先搬 RX 再延时: 缩短字节在环里的驻留时间, 避免突发响应丢字节。
+         * 阶段标记字母用 STAGE_MARK 包起来, 默认是空操作(见上面的 CPU_STAGE_MARKERS)。 */
+        STAGE_MARK('U'); usb_uart_rx_process();            /* USB 输入转发给 WIFI 串口 */
+        STAGE_MARK('W'); wifi_uart_rx_process();           /* WIFI 返回打印到 USB */
+        STAGE_MARK('T'); usb_tx_pump();                    /* 泵发 USB TX 环(非阻塞打印的兑现点) */
 
-        at_engine_tick(TICK_MS);             /* 引擎时基 */
+        STAGE_MARK('K'); at_engine_tick(TICK_MS);          /* 引擎时基 */
 
         /* ⚠ 引擎轮询只有一个调用点（DESIGN §4 单飞行）：
          * 诊断模式走 at_probe_poll（内部自己轮询引擎），
@@ -485,14 +519,16 @@ void hal_entry(void)
          * 二者互斥，由 at_probe_running() 判定，绝不能同时轮询。 */
         if (at_probe_running())
         {
-            at_probe_poll();                 /* AUTO / AUTOB 诊断中 */
+            STAGE_MARK('P'); at_probe_poll();             /* AUTO / AUTOB 诊断中 */
         }
         else
         {
-            weather_task_poll();             /* 正常天气状态机 */
+            STAGE_MARK('X'); weather_task_poll();         /* 正常天气状态机 */
         }
 
+        STAGE_MARK('D');
         R_BSP_SoftwareDelay(TICK_MS, BSP_DELAY_UNITS_MILLISECONDS);
+        STAGE_MARK('.');
     }
 #if BSP_TZ_SECURE_BUILD
     /* Enter non-secure code */

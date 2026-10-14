@@ -11,12 +11,23 @@
 
 int weather_parse_now(const char *body, weather_data_t *out)
 {
+    if (body == NULL || out == NULL) {
+        return -1;
+    }
+
     cJSON *root = cJSON_Parse(body);
     if (root == NULL) {
         return -1;
     }
 
     int ret = -1;
+    weather_data_t parsed;
+    memset(&parsed, 0, sizeof(parsed));
+    parsed.feels_like = -1;
+    parsed.humidity = -1;
+    parsed.wind_speed = -1;
+    parsed.high = -1;
+    parsed.low = -1;
     do {
         cJSON *results = cJSON_GetObjectItem(root, "results");
         if (!cJSON_IsArray(results) || cJSON_GetArraySize(results) < 1) {
@@ -34,15 +45,73 @@ int weather_parse_now(const char *body, weather_data_t *out)
         if (t == NULL || c == NULL || tp == NULL) {
             break;
         }
-        strncpy(out->text, cJSON_GetStringValue(t) ? t->valuestring : "",
-                sizeof(out->text) - 1);
-        out->code = atoi(cJSON_GetStringValue(c) ? c->valuestring : "0");
-        out->temperature = atoi(cJSON_GetStringValue(tp) ? tp->valuestring : "0");
+        strncpy(parsed.text, cJSON_GetStringValue(t) ? t->valuestring : "",
+                sizeof(parsed.text) - 1);
+        parsed.code = atoi(cJSON_GetStringValue(c) ? c->valuestring : "0");
+        parsed.temperature = atoi(cJSON_GetStringValue(tp) ? tp->valuestring : "0");
+
+        cJSON *feel = cJSON_GetObjectItem(now, "feels_like");
+        cJSON *humidity = cJSON_GetObjectItem(now, "humidity");
+        cJSON *wind = cJSON_GetObjectItem(now, "wind_speed");
+        if (feel && cJSON_GetStringValue(feel)) {
+            parsed.feels_like = atoi(feel->valuestring);
+        }
+        if (humidity && cJSON_GetStringValue(humidity)) {
+            parsed.humidity = atoi(humidity->valuestring);
+        }
+        if (wind && cJSON_GetStringValue(wind)) {
+            parsed.wind_speed = atoi(wind->valuestring);
+        }
 
         cJSON *up = cJSON_GetObjectItem(root, "last_update");
         if (up && up->valuestring) {
-            strncpy(out->update, up->valuestring, sizeof(out->update) - 1);
+            strncpy(parsed.update, up->valuestring, sizeof(parsed.update) - 1);
         }
+        *out = parsed;
+        ret = 0;
+    } while (0);
+
+    cJSON_Delete(root);
+    return ret;
+}
+
+int weather_parse_daily(const char *body, weather_data_t *out)
+{
+    if (body == NULL || out == NULL) {
+        return -1;
+    }
+
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL) {
+        return -1;
+    }
+
+    int ret = -1;
+    do {
+        cJSON *results = cJSON_GetObjectItem(root, "results");
+        if (!cJSON_IsArray(results) || cJSON_GetArraySize(results) < 1) {
+            break;
+        }
+        cJSON *r0 = cJSON_GetArrayItem(results, 0);
+        cJSON *daily = cJSON_GetObjectItem(r0, "daily");
+        if (!cJSON_IsArray(daily) || cJSON_GetArraySize(daily) < 1) {
+            break;
+        }
+        cJSON *d0 = cJSON_GetArrayItem(daily, 0);
+        cJSON *high = cJSON_GetObjectItem(d0, "high");
+        cJSON *low = cJSON_GetObjectItem(d0, "low");
+        if (high == NULL || low == NULL ||
+            cJSON_GetStringValue(high) == NULL ||
+            cJSON_GetStringValue(low) == NULL) {
+            break;
+        }
+
+        out->high = atoi(high->valuestring);
+        out->low = atoi(low->valuestring);
+
+        /* Keep humidity and wind_speed from now.json for the live conditions
+         * shown on the GD32-style main page; daily data supplies only the range. */
+        out->daily_valid = 1U;
         ret = 0;
     } while (0);
 
@@ -56,6 +125,11 @@ int weather_parse_now(const char *body, weather_data_t *out)
  * （api.seniverse.com/v3/weather/now.json，location=ip&language=zh-Hans），
  * 一字未改，包含完整的中文 UTF-8 字段。把真实字节喂给真 cJSON，
  * 就不必靠"看字段名像不像对的"来下结论。
+ *
+ * ⚠ 2026-10-13 起请求语言改为 weather_cfg.h:WEATHER_LANG（当前 "en"），
+ *   新响应的 text/name 取值会变成英文。本样本保留当年的中文字节不动：
+ *   解析层只认 JSON key（results/now/text/code/temperature/last_update），
+ *   不认取值，因此换成英文响应同样通过自检。
  *
  * 注意字段名：天气现象/编码/温度都在 results[0].now 下，
  * 键名分别是 text / code / temperature，三者**都是字符串**（所以要 atoi）。

@@ -170,7 +170,8 @@ static void grab_content_type (const char * buf, uint16_t n, int end,
                 {
                     if (0U == o)
                     {
-                        continue;               /* 跳过后续空白 */
+                        v++;                    /* 跳过后续空白, 必须先前进否则连续空白会死循环 */
+                        continue;
                     }
                 }
                 if (o < (uint16_t)(size - 1U))

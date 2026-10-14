@@ -11,13 +11,21 @@
  * AUTOB（开机自动重连测试）必须有 SSID 才会运行。
  * ⚠ 口令会随 [AT>] 回显明文出现在串口日志里，测试板可接受；量产前需改为
  *   不回显或从 DA16200 NVRAM 只存不读。 */
-#define WEATHER_DEFAULT_SSID     "CMCC-xxxx"
-#define WEATHER_DEFAULT_PWD      "<PASSWORD>"
+#define WEATHER_DEFAULT_SSID     "<REDACTED_WIFI_SSID>"
+#define WEATHER_DEFAULT_PWD      "<REDACTED_WIFI_PASSWORD>"
 
 /* ===================== 2. 心知天气 API =================== */
 #define WEATHER_API_KEY          "<REDACTED_API_KEY>"
 /* 城市拼音, 留空 "" = 按IP自动定位。例: "beijing" */
-#define WEATHER_CITY             ""
+#define WEATHER_CITY             "ip"
+/* 返回语言(心知 language 参数, 官方 docs.seniverse.com/api/start/common.html):
+ *   "zh-Hans" 简体中文(缺省) | "zh-Hant" 繁体 | "en" 英文 | "ja" 日语
+ *   "de"/"fr"/"es"/"pt"/"hi"/"id"/"ru"/"th"/"ar"
+ * ⚠ 只影响 JSON 里 text/name 的**取值**, key 一律不变, 因此 weather_parse.c 无需改动。
+ * ⚠ 该串会被拼进 AT+NWHTC 命令; 若从 PC 串口手动发送, 注意 99 字节截断问题
+ *   (见 doc/AT_03_心知天气.md 第 10 节)。固件内部生成的命令不受此限制。 */
+#define WEATHER_LANG             "en"
+#define WEATHER_UI_SERIAL_SIM    1U       /* 1=串口模拟128x32 OLED；0=实际OLED */
 #define WEATHER_REFRESH_MIN      15      /* 天气刷新周期(分钟) */
 #define WEATHER_REQ_TIMEOUT_MS   9000    /* HTTP 请求超时(ms) */
 

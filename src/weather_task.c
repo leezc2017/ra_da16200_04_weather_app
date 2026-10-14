@@ -41,10 +41,12 @@ typedef enum {
     CMD_TIME,          /**< AT+TIME */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
-    CMD_NWIP,          /**< AT+NWIP=?: 主动查当前 IP（判断模块是否已连上） */
+    CMD_NWIP,          /**< AT+NWIP=?: 读接口 IP（只用于取地址，不用于判断连接） */
+    CMD_WFSTA,         /**< AT+WFSTA: 权威连接状态（手册 L1149：+WFSTA:1 已关联 / 0 未关联） */
     CMD_WFCAP,         /**< AT+WFCAP: 用 NVRAM 已存 profile 连接 */
     CMD_WFJAPA,        /**< AT+WFJAPA: 连接并写入 NVRAM */
-    CMD_HTTP           /**< AT+NWHTC (weather_http_get_start) */
+    CMD_HTTP_NOW,      /**< AT+NWHTC now.json */
+    CMD_HTTP_DAILY     /**< AT+NWHTC daily.json */
 } cmd_owner_t;
 
 /**
@@ -78,6 +80,30 @@ typedef enum {
 /** 最高阶梯连续失败这么多次后, 退回到第一级重跑整条链 */
 #define WIFI_WFJAPA_MAX_TRY  3U
 
+/**
+ * @brief 同一个阶梯状态最多隔多少次重试再打一次日志
+ *
+ * 阶梯每 WEATHER_CONNECT_TIMEOUT_MS(8s) 跳一级，无限重试时会刷出成百上千行
+ * 几乎相同的文本。实测一次失败的抓取里，光 "WFJAPA failed" 就占了 20+ 行，
+ * 把真正有意义的状态迁移埋掉了。同签名只打第一遍，之后每 N 次打一行"还在原地"。
+ */
+#define LADDER_LOG_REPEAT    10U
+
+/**
+ * @brief AT+TZONE 最多重试几次后放弃对时
+ *
+ * ⚠ 这条是为了打破"初始化三段式互相阻塞"而加的（2026-10-12）。
+ *
+ * 原调度是一条严格串行链：
+ *   TZONE 成功 -> SNTP 成功 -> 才发天气请求
+ * 任一段失败都会把后续全部堵死。TZONE 只有 2500ms 超时，模块冷启动
+ * 响应慢时很容易超时，于是天气永远取不到。
+ *
+ * 时区/对时只是显示层的锦上添花，不该阻塞天气数据。所以失败够多次就
+ * 直接把 timezone_set 置 true 当作"已处理"，让链路继续往下走。
+ */
+#define TZ_MAX_FAIL          3U
+
 /* ===================== 状态 ===================== */
 
 static struct {
@@ -90,6 +116,7 @@ static struct {
     bool    time_valid;         /**< 已拿到过有效时间 */
     bool    timezone_set;       /**< AT+TZONE 已成功下发 */
     bool    sntp_done;          /**< AT+NWSNTP 已投递 */
+    uint8_t tz_fail;            /**< TZONE 连续失败次数, 到 TZ_MAX_FAIL 就不再堵链路 */
     char    time_str[6];        /**< 最近一次 AT+TIME 的 "HH:MM" */
 
     /* 天气 */
@@ -109,6 +136,9 @@ static struct {
 
     /* 联网阶梯(见 WIFI_STEP_* 注释) */
     uint8_t  wifi_step;
+    uint8_t  wifi_sta_ok;        /**< AT+WFSTA 最近一次回答: 1=已关联 0=未关联 */
+    uint16_t ladder_sig;         /**< 已打印的 (step<<8|err)，用于日志限流 */
+    uint8_t  ladder_nprint;      /**< 同一签名已重复打印次数 */
     uint8_t  wifi_try;            /**< 当前阶梯已尝试次数, 用于退避 */
 
     /* 心跳诊断(WEATHER_HB_DIAG_MS=0 时不打印) */
@@ -224,9 +254,11 @@ static const char * cmd_st_name (cmd_owner_t c)
         case CMD_TZSET:   return "TZONE";
         case CMD_SNTP:    return "SNTP";
         case CMD_NWIP:    return "NWIP";
+        case CMD_WFSTA:   return "WFSTA";
         case CMD_WFCAP:   return "WFCAP";
         case CMD_WFJAPA:  return "WFJAPA";
-        case CMD_HTTP:    return "NWHTC";
+        case CMD_HTTP_NOW:   return "NWHTC-NOW";
+        case CMD_HTTP_DAILY: return "NWHTC-DAY";
         default:          return "?";
     }
 }
@@ -358,6 +390,7 @@ static void mark_connected (const char * how)
     s.ui_dirty = true;
     s.timezone_set = false;
     s.sntp_done    = false;
+    s.tz_fail      = 0U;      /* 每次重新连上都要清零, 否则沿用上一轮的失败计数 */
     s.wifi_try     = 0U;
     /* 阶段2 硬编码 SSID 连的，与配置里的名字对齐即可；
      * 阶段4 配网拿到真 SSID 后改为从配置/存储读。 */
@@ -576,6 +609,7 @@ static bool take_time (char * time5, uint16_t size, char * date11)
                 if (l < (uint16_t)(sizeof(line) - 1U))
                 {
                     line[l] = b[i + 6U + l];
+                    l++;                      /* 必须递增, 否则 l 恒为 0 该循环永不退出 */
                 }
                 else
                 {
@@ -598,12 +632,21 @@ static bool take_time (char * time5, uint16_t size, char * date11)
  * @param buf  输出
  * @param size 大小
  */
-static void build_url (char * buf, uint16_t size)
+static void build_url (char * buf, uint16_t size, bool daily)
 {
-    snprintf(buf, size,
-             "http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=zh-Hans",
-             WEATHER_API_KEY,
-             ('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip");
+    if (daily) {
+        snprintf(buf, size,
+                 "http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=%s&unit=c&start=0&days=1",
+                 WEATHER_API_KEY,
+                 ('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip",
+                 WEATHER_LANG);
+    } else {
+        snprintf(buf, size,
+                 "http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=%s",
+                 WEATHER_API_KEY,
+                 ('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip",
+                 WEATHER_LANG);
+    }
 }
 
 /* ===================== 天气拉取 ===================== */
@@ -632,11 +675,11 @@ static bool fetch_weather_start (void)
         return false;
     }
 
-    build_url(url, sizeof(url));
+    build_url(url, sizeof(url), false);
     printf("[wx] fetch %s\r\n", url);
     if (weather_http_get_start(url, WEATHER_HTTP_TIMEOUT_MS))
     {
-        s.cmd = CMD_HTTP;            /* 重要: 标记引擎当前在服务 HTTP 命令 */
+        s.cmd = CMD_HTTP_NOW;        /* 当前是 now.json 请求 */
         /* 记发起时刻, 让 OLED 能显示"已经等了几秒"。
          * 2026-10-04 的误判: 抓到的日志停在 [hb] 1s(请求刚发出 1 秒)就被当成
          * "抓取有问题"。屏幕上必须能看出"还在飞"和"等了几秒"。 */
@@ -651,48 +694,58 @@ static bool fetch_weather_start (void)
 /**
  * @brief 天气请求完成后解析 JSON
  */
-static void fetch_weather_done (void)
+static bool fetch_weather_now_done (void)
 {
-    const weather_http_result_t * res = weather_http_result();
+    const weather_http_result_t *res = weather_http_result();
+    weather_data_t parsed;
 
     s_wxr.at_ms    = at_engine_now_ms();
     s_wxr.http     = res->http_status;
     s_wxr.nw       = res->nw_status;
     s_wxr.body_len = (res->len > 0) ? (uint16_t)res->len : 0U;
 
-    /* 无论成败都打一行, 且行首统一 [WX-RESULT]。
-     * 之前成功/失败用不同前缀([wx] OK: / [wx] fetch failed: / [wx] parse failed:),
-     * 排查时无法用单一关键字把"这次拉取的结果"grep 出来, 容易误判成没走到。 */
-    if ((res->len <= 0) || (res->http_status != 200))
-    {
+    if ((res->len <= 0) || (res->http_status != 200)) {
         s_wxr.kind = (res->len <= 0) ? WXR_TRANSPORT_ERR : WXR_HTTP_ERR;
-        printf("[WX-RESULT] FAIL http=%d nw=%d len=%d\r\n",
+        printf("[WX-RESULT] NOW FAIL http=%d nw=%d len=%d\r\n",
                res->http_status, res->nw_status, res->len);
         s.ui_dirty = true;
-        return;
+        return false;
     }
 
-    {
-        const char * body = weather_http_body(NULL);
-
-        if (0 != weather_parse_now(body, &s.wx))
-        {
-            /* 解析失败时把 JSON 打全 —— cJSON 不说失败原因, 只有字节能说。
-             * 分两段打, 避免单行过长被终端折行后看不清边界。 */
-            uint16_t n = s_wxr.body_len;
-            uint16_t half = (uint16_t)(n / 2U);
-
-            s_wxr.kind = WXR_PARSE_ERR;
-            printf("[WX-RESULT] PARSE-FAIL http=200 nw=%d len=%u\r\n",
-                   res->nw_status, res->len);
-            printf("[JSON-1/2] %.*s\r\n", (int)half, body);
-            printf("[JSON-2/2] %.*s\r\n",
-                   (int)((uint16_t)(n - half)), &body[half]);
-            s.ui_dirty = true;
-            return;
-        }
+    if (weather_parse_now(weather_http_body(NULL), &parsed) != 0) {
+        s_wxr.kind = WXR_PARSE_ERR;
+        printf("[WX-RESULT] NOW PARSE-FAIL http=200 len=%u\r\n",
+               (unsigned)s_wxr.body_len);
+        s.ui_dirty = true;
+        return false;
     }
 
+    s.wx = parsed;
+    s.wx_valid = true;
+    s.ui_dirty = true;
+    printf("[WX-NOW] %s %dC code=%d up=%s\r\n",
+           s.wx.text, s.wx.temperature, s.wx.code, s.wx.update);
+    return true;
+}
+
+static bool fetch_weather_daily_start (void)
+{
+    char url[224];
+
+    build_url(url, sizeof(url), true);
+    printf("[wx] fetch daily %s\r\n", url);
+    if (!weather_http_get_start(url, WEATHER_HTTP_TIMEOUT_MS)) {
+        return false;
+    }
+    s.cmd = CMD_HTTP_DAILY;
+    s.fetch_t0 = at_engine_now_ms();
+    s.fetch_sec = 0xFFFFFFFFU;
+    s.ui_dirty = true;
+    return true;
+}
+
+static void fetch_weather_publish (void)
+{
     s_wxr.kind        = WXR_OK;
     s_wxr.temperature = s.wx.temperature;
     s_wxr.code        = (uint8_t)s.wx.code;
@@ -703,8 +756,26 @@ static void fetch_weather_done (void)
     s.wx_valid  = true;
     s.wx_age_ms = 0U;
     s.ui_dirty  = true;
-    printf("[WX-RESULT] OK %s %dC code=%d up=%s\r\n",
-           s.wx.text, s.wx.temperature, s.wx.code, s.wx.update);
+    printf("[WX-RESULT] OK %s %dC code=%d high=%d low=%d humidity=%d wind=%d\r\n",
+           s.wx.text, s.wx.temperature, s.wx.code,
+           s.wx.high, s.wx.low, s.wx.humidity, s.wx.wind_speed);
+}
+
+static void fetch_weather_daily_done (void)
+{
+    const weather_http_result_t *res = weather_http_result();
+
+    if ((res->len <= 0) || (res->http_status != 200)) {
+        printf("[WX-DAILY] unavailable http=%d nw=%d len=%d\r\n",
+               res->http_status, res->nw_status, res->len);
+    } else if (weather_parse_daily(weather_http_body(NULL), &s.wx) != 0) {
+        printf("[WX-DAILY] parse failed len=%d\r\n", res->len);
+    } else {
+        printf("[WX-DAILY] high=%dC low=%dC\r\n", s.wx.high, s.wx.low);
+    }
+
+    /* Daily data is optional: keep a successful now.json result if this call fails. */
+    fetch_weather_publish();
 }
 
 /* ===================== 命令结果分发 ===================== */
@@ -755,6 +826,20 @@ static void on_cmd_done (at_result_t r)
             printf("[wx] TZONE %s (unit=sec, tz=%d)\r\n",
                    (AT_RES_OK == r) ? "OK" : "FAIL", (int)(WEATHER_TZ_HOURS * 3600));
             s.timezone_set = (AT_RES_OK == r);
+            if (AT_RES_OK == r)
+            {
+                s.tz_fail = 0U;
+            }
+            else if (++s.tz_fail >= TZ_MAX_FAIL)
+            {
+                /* 放弃对时，但必须放行链路：置 true 当作"已处理"，
+                 * 否则 poll 里的 TZONE 分支会永远满足 !timezone_set，
+                 * 把天气取数饿死。 */
+                printf("[wx] TZONE failed %u times, skip time sync (weather fetch continues)\r\n",
+                       (unsigned) s.tz_fail);
+                s.timezone_set = true;
+                s.sntp_done    = true;   /* SNTP 依赖时区，一并跳过 */
+            }
             break;
 
         case CMD_SNTP:
@@ -765,29 +850,48 @@ static void on_cmd_done (at_result_t r)
                              (WEATHER_TIME_POLL_MS);
             break;
 
+        case CMD_WFSTA:
+            /* +WFSTA:1 / +WFSTA:0 以 '+' 开头，会被 line_done() 收进 URC FIFO，
+             * 由 poll 第 2b 步统一消费并据此 mark_connected。这里只留失败日志。 */
+            if (AT_RES_OK != r)
+            {
+                printf("[wx] WFSTA query failed (err=%d)\r\n",
+                       at_engine_resp()->err_code);
+            }
+            reconnect_if_needed();
+            break;
+
         case CMD_NWIP:
             /* 结果不在这判: +NWIP:0,<ip>,<mask>,<gw> 以 '+' 开头会被 line_done()
-             * 收进 URC FIFO, 由 poll 第 2b 步统一消费。这里只记日志。 */
-            printf("[wx] NWIP query %s (err=%d); waiting +NWIP / +WFJAP\r\n",
-                   (AT_RES_OK == r) ? "OK" : "failed",
-                   at_engine_resp()->err_code);
+             * 收进 URC FIFO, 由 poll 第 2c 步统一消费。这里只留失败日志。 */
+            if (AT_RES_OK != r)
+            {
+                printf("[wx] NWIP query failed (err=%d)\r\n",
+                       at_engine_resp()->err_code);
+            }
             reconnect_if_needed();
             break;
 
         case CMD_WFCAP:
             /* ⚠ 不要再把 ERROR:-7 直接当成"无 profile"：只复位 RA 板子时模块往往
              * **已经连着**，这条错误只是"没必要再连"，profile 其实还在 NVRAM。
-             * 真实是否已连上由阶梯第一级的 AT+NWIP=? 回读决定。 */
-            printf("[wx] WFCAP %s (err=%d); waiting +WFJAP / +NWIP\r\n",
-                   (AT_RES_OK == r) ? "accepted" : "failed",
-                   at_engine_resp()->err_code);
+             * 真实是否已连上由阶梯第一级的 AT+WFSTA 回答决定。
+             * 成功时不打印：阶梯下一跳的打点已经覆盖了状态迁移。 */
+            if (AT_RES_OK != r)
+            {
+                printf("[wx] WFCAP rejected (err=%d)\r\n",
+                       at_engine_resp()->err_code);
+            }
             reconnect_if_needed();
             break;
 
         case CMD_WFJAPA:
-            printf("[wx] WFJAPA %s (err=%d); waiting +WFJAP / +NWIP\r\n",
-                   (AT_RES_OK == r) ? "accepted" : "failed",
-                   at_engine_resp()->err_code);
+            /* 失败日志由阶梯的限流打点负责（ladder_sig 含 err_code），
+             * 这里只在成功时打一行，因为"发起连接被接受"是有意义的状态迁移。 */
+            if (AT_RES_OK == r)
+            {
+                printf("[wx] WFJAPA accepted, waiting +WFSTA / +WFJAP\r\n");
+            }
             reconnect_if_needed();
             /* 失败计数放在这里而不是 poll 里: on_cmd_done 每条命令只跑一次，
              * 若在 poll 里按 tick 自增, 10ms 一跳几秒就误判"用尽"。
@@ -818,7 +922,9 @@ static void on_cmd_done (at_result_t r)
     {
         s.wifi_step  = WIFI_STEP_NWIP_QUERY;
         s.connect_t0 = at_engine_now_ms();
-        (void)at_send_owned("AT+NWIP=?", 2500U, CMD_NWIP);
+        /* ⚠ 2026-10-12: 原来开机第一条是 AT+NWIP=?，但那条命令**无法判断连接状态**
+         *   （第一字段是接口号，见 poll 第 2c 步注释）。换成权威的 AT+WFSTA。 */
+        (void)at_send_owned("AT+WFSTA", 2500U, CMD_WFSTA);
     }
 }
 
@@ -859,6 +965,8 @@ static void ui_refresh (void)
         memset(&mv, 0, sizeof(mv));
         time_str_get(time5, sizeof(time5));
         snprintf(mv.time_str, sizeof(mv.time_str), "%s", time5);
+        /* Stage 1 uses Seniverse IP geolocation rather than a configured city. */
+        snprintf(mv.city, sizeof(mv.city), "IP");
 
         if (s.wx_valid)
         {
@@ -869,7 +977,12 @@ static void ui_refresh (void)
              * GB2312/GBK 索引的（oledfont.h 的 Hzk[]）。把 UTF-8 字节直接喂
              * OLED_ShowString 会按 GBK 拆成两个错字 —— 这不是本工程的移植
              * 遗漏：GD32 版 weather_ui.c / oled.c 与本工程**逐字节相同**，
-             * 它同样如此（两边都没有编码转换，URL 也都带 language=zh-Hans）。
+             * 它同样如此（两边都没有编码转换）。
+             *
+             * ★ 2026-10-13: 请求语言已改 WEATHER_LANG="en"（weather_cfg.h）。
+             *   英文是纯 ASCII，不存在 UTF-8/GBK 错位 —— 若哪天要直接显示
+             *   now.text，English 这条路反而是通的。但本工程仍走 code 查表
+             *   （见下），与返回语言无关，因此换语言不需要改显示逻辑。
              *
              * 而中文这条路目前根本铺好：oled_font_data/oled_cn_font.c 里
              * 只有占位记录、没有任何真实字模数据，oledfont.h 的 Hzk[] 也只有
@@ -880,6 +993,21 @@ static void ui_refresh (void)
              * 待 tools/glyph2c.py 生成中文字模表后，再切回中文显示。 */
             snprintf(mv.wtext, sizeof(mv.wtext), "%s",
                      weather_text_get(s.wx.code));
+            if (s.wx.humidity >= 0)
+            {
+                snprintf(mv.humidity_str, sizeof(mv.humidity_str), "%d",
+                         s.wx.humidity);
+            }
+            if (s.wx.wind_speed >= 0)
+            {
+                snprintf(mv.wind_str, sizeof(mv.wind_str), "%d",
+                         s.wx.wind_speed);
+            }
+            if (s.wx.daily_valid && (s.wx.low >= 0) && (s.wx.high >= 0))
+            {
+                snprintf(mv.low_str, sizeof(mv.low_str), "%d", s.wx.low);
+                snprintf(mv.high_str, sizeof(mv.high_str), "%d", s.wx.high);
+            }
             mv.icon    = (uint8_t)weather_icon_of(s.wx.code);
             mv.offline = (s.status != WIFI_STAT_CONNECTED) ? 1U : 0U;
         }
@@ -923,7 +1051,7 @@ static void ui_refresh (void)
         ui_wifi_view_t wv;
 
         memset(&wv, 0, sizeof(wv));
-        wv.ssid  = s.ssid;
+        wv.ssid  = (s.ssid[0] != '\0') ? s.ssid : WEATHER_DEFAULT_SSID;
         wv.ip    = s.ip;
         wv.fails = s.fails;
         wv.page  = s.page;
@@ -1069,12 +1197,38 @@ void weather_task_poll (void)
             }
             else
             {
-                printf("[wx] +WFJAP:1 has no IP field, fall back to NWIP query\r\n");
+                /* ⚠ 2026-10-12: 这里不能只说"没有 IP 字段"。
+                 * parse_ip() 现在会拒绝 0.0.0.0 / x.x.x.0 / 169.254.* /
+                 * 10.0.0.* 这些不可用地址，所以失败既可能是字段缺失，
+                 * 也可能是拿到了占位地址 —— 两种都意味着还没真连上。 */
+                printf("[wx] +WFJAP:1 has no usable IP, fall back to NWIP query\r\n");
                 s.wifi_step  = WIFI_STEP_NWIP_QUERY;
                 s.connect_t0 = now;
             }
         }
-        /* 2b. +NWIP 回读：模块已连上但 URC 被错过时走这里 */
+        /* 2b. +WFSTA:1 —— 手册 L1149 定义的**权威**连接状态。
+         *
+         * ⚠ 为什么必须用这条，而不是继续从 +NWIP 里猜（2026-10-12 修正）：
+         *   手册 L832 明确 `AT+NWIP` 的第一个参数是**接口号**（0=WLAN0/STA，
+         *   1=WLAN1/Soft-AP），`AT+NWIP=?` 的响应格式是 `+NWIP:<iface>,<ip>,...`。
+         *   实测模块回的是 `+NWIP:1,10.0.0.1,255.255.255.0,10.0.0.1` ——
+         *   第一个字段是 **1 = Soft-AP 接口**，10.0.0.1 是模组内置 SoftAP 的地址，
+         *   完全不代表 STA 已经从 CMCC-xxxx 拿到地址。
+         *   之前把"能解出一个像样 IP"当成"已连上"，就是被这条误导的。
+         *   AT+WFSTA 没有这种歧义：1=已关联，0=未关联。
+         */
+        else if (at_engine_urc_get("+WFSTA:1", urc, sizeof(urc)))
+        {
+            printf("[wx] +WFSTA:1 => module IS associated with an AP\r\n");
+            /* 关联成功但还不知道地址，接着问一次 IP */
+            (void)at_send_owned("AT+NWIP=?", 2500U, CMD_NWIP);
+        }
+        else if (at_engine_urc_get("+WFSTA:0", urc, sizeof(urc)))
+        {
+            /* 未关联。这不是故障，只是阶梯没爬上去，不打印以免刷屏 */
+            s.wifi_sta_ok = false;
+        }
+        /* 2c. +NWIP 回读：模块已连上但 URC 被错过时走这里 */
         else if (at_engine_urc_get("+NWIP", urc, sizeof(urc)))
         {
             printf("[wx] +NWIP urc='%s'\r\n", urc);
@@ -1094,18 +1248,36 @@ void weather_task_poll (void)
                  ((now - s.connect_t0) >= WEATHER_CONNECT_TIMEOUT_MS))
         {
             char cmd[96];
+            int  lad_err = at_engine_resp() ? at_engine_resp()->err_code : 0;
+            uint16_t lad_sig = (uint16_t)(((unsigned)s.wifi_step << 8) |
+                                          ((unsigned)(lad_err & 0xFF)));
 
-            printf("[wx] step %u idle %lums (try=%u), escalating\r\n",
-                   (unsigned)s.wifi_step,
-                   (unsigned long)(now - s.connect_t0),
-                   (unsigned)s.wifi_try);
+            /* 日志限流：阶梯每 8s 一跳，不限流的话一次失败会刷出上百行几乎相同的文本，
+             * 把真正有意义的状态迁移埋掉。同一个 (step, err) 只打第一遍，
+             * 之后每 LADDER_LOG_REPEAT 次再打一次"还在原地"。 */
+            if (s.ladder_sig != lad_sig)
+            {
+                s.ladder_sig    = lad_sig;
+                s.ladder_nprint = 0U;
+                printf("[wx] step %u idle %lums (try=%u) -> escalate (err=%d)\r\n",
+                       (unsigned)s.wifi_step,
+                       (unsigned long)(now - s.connect_t0),
+                       (unsigned)s.wifi_try,
+                       (int)lad_err);
+            }
+            else if (++s.ladder_nprint >= LADDER_LOG_REPEAT)
+            {
+                s.ladder_nprint = 0U;
+                printf("[wx] step %u still stuck (try=%u)\r\n",
+                       (unsigned)s.wifi_step, (unsigned)s.wifi_try);
+            }
             s.connect_t0 = now;
 
             switch (s.wifi_step)
             {
                 case WIFI_STEP_NWIP_QUERY:
-                    /* 主动问 IP：模块若已连上这一步就收工，且免疫 URC 错过 */
-                    (void)at_send_owned("AT+NWIP=?", 2500U, CMD_NWIP);
+                    /* 主动问连接状态：模块若已连上这一步就收工，且免疫 URC 错过 */
+                    (void)at_send_owned("AT+WFSTA", 2500U, CMD_WFSTA);
                     s.wifi_step = WIFI_STEP_WAIT_URC;
                     break;
 
@@ -1117,12 +1289,19 @@ void weather_task_poll (void)
 
                 case WIFI_STEP_WFCAP:
                 default:
-                    /* 显式带 SSID/PWD：连 + 写 NVRAM，最兜底 */
+                    /* 显式带 SSID/PWD：连 + 写 NVRAM，最兜底。
+                     *
+                     * ⚠ 2026-10-12 修正：原来这里是 `case WFCAP:` 和 `default:`
+                     *   合并的，fallthrough 进去后无条件执行 `s.wifi_try = 0U`。
+                     *   结果是：每次重试都把失败计数清零，于是
+                     *   on_cmd_done 里的 `wifi_try >= WIFI_WFJAPA_MAX_TRY` 永远不成立，
+                     *   阶梯卡在第 3 级无限循环 AT+WFJAPA，既不换手段也不退���重爬。
+                     *   现场证据：日志里 step=3 try=0 / try=1 交替出现且永不变。
+                     *   现在计数完全交给 on_cmd_done 维护，这里不再碰 wifi_try。 */
                     snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
                              WEATHER_DEFAULT_SSID, WEATHER_DEFAULT_PWD);
                     (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
                     s.wifi_step = WIFI_STEP_WFJAPA;
-                    s.wifi_try  = 0U;
                     break;
             }
         }
@@ -1135,16 +1314,31 @@ void weather_task_poll (void)
 
         if (AT_RES_PENDING != r)
         {
-            if (CMD_HTTP == s.cmd)
+            if ((CMD_HTTP_NOW == s.cmd) || (CMD_HTTP_DAILY == s.cmd))
             {
                 /* HTTP 命令: 结果归 weather_http */
                 weather_http_on_engine_done(r);
                 if (weather_http_done())
                 {
-                    fetch_weather_done();
-                    s.ui_dirty = true;
+                    cmd_owner_t completed = s.cmd;
                     weather_http_clear();
                     s.cmd = CMD_NONE;
+
+                    if (CMD_HTTP_NOW == completed)
+                    {
+                        if (fetch_weather_now_done())
+                        {
+                            if (!fetch_weather_daily_start())
+                            {
+                                printf("[WX-DAILY] request start failed; using now data\r\n");
+                                fetch_weather_publish();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        fetch_weather_daily_done();
+                    }
                 }
             }
             else if (CMD_NONE != s.cmd)
@@ -1181,9 +1375,15 @@ void weather_task_poll (void)
                 snprintf(cmd, sizeof(cmd), "AT+NWSNTP=1,%s,86400", NTP_SERVER_1);
                 (void)at_send_owned(cmd, 6000U, CMD_SNTP);
             }
-            else if (s.sntp_done && !s.wx_valid && (CMD_NONE == s.cmd))
+            else if (!s.wx_valid && (CMD_NONE == s.cmd))
             {
-                /* 链路就绪但还没拉到天气 -> 立即拉一次 */
+                /* 链路就绪但还没拉到天气 -> 立即拉一次。
+                 *
+                 * ⚠ 不再要求 s.sntp_done（2026-10-12）。原来三段严格串行，
+                 * 只要 TZONE 或 SNTP 没成功就永远走不到这里。取天气是主功能，
+                 * 对时只是附加价值，不能让它挡住。
+                 * 实际效果：连上后的第一个空闲 tick 就发天气请求，
+                 * TZONE/SNTP 在此之前的那一两个 tick 里已完成或已放弃。 */
                 if (fetch_weather_start())
                 {
                     printf("[wx] first fetch issued\r\n");

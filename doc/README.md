@@ -4,8 +4,8 @@
 
 本工程是 **RA4M2 + DA16200 天气显示站**（复刻 GD32VW553 版 `4.weather_app`），总体方案见根目录 `DESIGN.md`。
 
-- **当前状态（阶段1）**：AT 引擎已实现（`src/at_engine.c` + `src/at_probe.c`），USB 输入 `AUTO` 可运行自动诊断序列；天气链路、OLED、SoftAP 配网按 DESIGN.md §7 阶段推进。
-- 后续阶段完成后，本 README 将随功能同步更新。
+- **当前状态（阶段2，串口 OLED 模拟）**：天气状态机使用固定 WiFi 凭据，心知天气按 `location=ip` 获取；主页与 WiFi 信息页通过 USB 串口输出 128×32 OLED 的四行内容。真实 OLED 未连接时跳过 OLED 初始化。
+- SoftAP 模式切换和网页配置 SSID/密码/城市仍属于 DESIGN.md §7 阶段4；当前阶段不实现网页配网。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。
 
@@ -186,7 +186,7 @@ Local: KEY = key pin levels now, HB = heartbeat snapshot now
 > 本地命令不再把"发送完成"标志偷走——否则 AT 引擎的 ST_SENDING 会被
 > 误判超时（见 commit 4456638 的根因说明）。
 
-随后 `at_engine_init()` → `oled_port_init()` → `weather_task_init()`。
+随后 `at_engine_init()` → 根据 `WEATHER_UI_SERIAL_SIM` 决定是否调用 `oled_port_init()` → `weather_task_init()`。串口模拟模式下不访问 OLED 引脚。
 
 `weather_task_init()` **上电先发一条裸 `AT` 做模块自检**（2026-10-03 用户要求：
 「每次开机先用 AT 命令测试模块，再走后续」），再进入天气状态机：
@@ -379,6 +379,14 @@ ATF                    恢复出厂（清 NVRAM）
   ```
   脚本内置天气站字符集（按页面归类，便于校对）。
 
+### 5.4 第一阶段固定配置与串口 OLED 模拟
+
+- `src/weather_cfg.h` 当前配置固定 WiFi SSID `<REDACTED_WIFI_SSID>`、密码 `<REDACTED_WIFI_PASSWORD>`，天气位置设为 `ip`，由心知服务按来源 IP 定位城市。
+- `WEATHER_UI_SERIAL_SIM=1` 时，`hal_entry()` 跳过 `oled_port_init()`；`weather_ui.c` 将主页和 WiFi 信息页输出为 `[OLED] PAGE=...` 及 `L0`–`L3` 四行。每行最多 21 个 ASCII 字符，对应 128×32 屏使用 6 像素宽字体时的可视宽度。
+- 主页内容：IP 定位标记、实时天气/温度、实时湿度/风速、今日低温/高温和时间。实时数据来自 `now.json`，今日温度范围由其后的 `daily.json` 补充；daily 请求失败不影响实时天气显示。
+- WiFi 信息页显示 SSID、当前 IP 和连接状态；按键翻页行为与主状态机相同。
+- 设置 `WEATHER_UI_SERIAL_SIM=0` 可启用 OLED 硬件初始化与绘制。OLED 未连接时保持 `1`，避免访问未接硬件。
+
 ## 6. 编译
 
 ```
@@ -443,9 +451,9 @@ git commit      # 提交信息要说明【为什么】改，而不只是改了�
 ├── src/oled/oled_font.c/.h    字库查表 + UTF-8⇄GBK 转换（**本工程新增**）
 ├── src/oled_font_data/    可扩充汉字表（占位，由 tools/glyph2c.py 生成）
 │
-├── src/weather_ui.c/.h    OLED 4 页面绘制（**原样移植 GD32 版**）
+├── src/weather_ui.c/.h    主页与 WiFi 信息页；支持串口四行模拟或 OLED 绘制
 ├── src/weather_text.c/.h  心知 code→文案/图标（**原样移植 GD32 版**，GBK 无 BOM）
-├── src/weather_parse.c/.h JSON 解析（**原样移植 GD32 版**，依赖 cJSON，阶段2 接）
+├── src/weather_parse.c/.h JSON 解析（now 实况与 daily 今日温度范围，依赖 cJSON）
 ├── src/wifi_status.h      wifi_status_t 五态（从 GD32 wifi_prov.h 抽出，平台无关）
 ├── tools/glyph2c.py       TTF → 汉字点阵生成器
 │

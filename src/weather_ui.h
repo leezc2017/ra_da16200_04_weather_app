@@ -22,11 +22,16 @@
 #include <stdint.h>
 #include "wifi_status.h"
 
-/* 主页视图数据 */
+/* 主页视图数据；串口模拟和实体 OLED 共用同一份内容。 */
 typedef struct {
     char    time_str[6];    /* "12:34" 或 "--:--" */
+    char    city[16];       /* 当前固定配置为 "IP" */
     char    temp_str[8];    /* "26C" */
-    char    wtext[16];      /* "Sunny" */
+    char    wtext[16];      /* ASCII 天气文案 */
+    char    humidity_str[8];
+    char    wind_str[8];
+    char    low_str[8];
+    char    high_str[8];
     uint8_t icon;           /* weather_icon_t, 0xFF=无图标 */
     uint8_t offline;        /* 1=数据过期(掉线) */
 } ui_main_view_t;
