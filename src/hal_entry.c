@@ -57,7 +57,9 @@
 #define DIAG_LED1_PIN            BSP_IO_PORT_04_PIN_05
 #define DIAG_LED2_PIN            BSP_IO_PORT_04_PIN_04
 #define DIAG_LED3_PIN            BSP_IO_PORT_00_PIN_02
-#define DIAG_LED_UPDATE_MS      (200U)
+#define DIAG_LED_BLINK_MS       (200U)
+#define DIAG_LED_BREATH_FRAME_MS (10U)
+#define DIAG_LED_BREATH_STEP_MS (125U)
 
 /* Low-overhead runtime breadcrumbs, included in HB snapshots. */
 volatile uint32_t diag_main_loops;
@@ -193,24 +195,41 @@ static void diag_fault_report(void)
     }
 }
 
-static void diag_led_service(bsp_io_level_t * heartbeat_level)
+static void diag_led_service(void)
 {
-    *heartbeat_level = (BSP_IO_LEVEL_HIGH == *heartbeat_level) ?
-                       BSP_IO_LEVEL_LOW : BSP_IO_LEVEL_HIGH;
+    static uint16_t blink_ms;
+    static uint16_t breath_frame_ms;
+    static uint16_t breath_step_ms;
+    static uint8_t blink_level = 1U;
+    static uint8_t breath_duty = 10U;
+    static uint8_t breath_rising = 1U;
+    static uint8_t breath_phase;
 
     wifi_status_t wifi = weather_task_wifi_status();
     bool fetching = weather_http_busy();
     bool weather_valid = weather_task_weather_valid();
+    bool connecting = ((WIFI_STAT_CONNECTING == wifi) || (WIFI_STAT_IDLE == wifi));
+    bool active = (connecting || fetching);
     bsp_io_level_t led1;
     bsp_io_level_t led2;
+    bsp_io_level_t led3;
+
+    /* Called each 10 ms main-loop pass. Blink markers advance independently
+     * from the slow breathing indicator. */
+    blink_ms = (uint16_t)(blink_ms + TICK_MS);
+    if (blink_ms >= DIAG_LED_BLINK_MS)
+    {
+        blink_ms = (uint16_t)(blink_ms - DIAG_LED_BLINK_MS);
+        blink_level = (uint8_t)!blink_level;
+    }
 
     if (WIFI_STAT_CONNECTED == wifi)
     {
         led1 = BSP_IO_LEVEL_HIGH;
     }
-    else if ((WIFI_STAT_CONNECTING == wifi) || (WIFI_STAT_IDLE == wifi))
+    else if (connecting)
     {
-        led1 = *heartbeat_level;              /* blink while attempting association */
+        led1 = blink_level ? BSP_IO_LEVEL_HIGH : BSP_IO_LEVEL_LOW;
     }
     else
     {
@@ -219,16 +238,61 @@ static void diag_led_service(bsp_io_level_t * heartbeat_level)
 
     if (fetching)
     {
-        led2 = *heartbeat_level;               /* blink while HTTP fetch is active */
+        led2 = blink_level ? BSP_IO_LEVEL_HIGH : BSP_IO_LEVEL_LOW;
     }
     else
     {
         led2 = weather_valid ? BSP_IO_LEVEL_HIGH : BSP_IO_LEVEL_LOW;
     }
 
+    if (active)
+    {
+        /* Activity is represented by LED1/LED2; suppress the idle breathing LED. */
+        led3 = BSP_IO_LEVEL_LOW;
+    }
+    else
+    {
+        /* 100 Hz software PWM with a triangle-wave duty from 10% to 90%;
+         * 125 ms duty steps give a smooth, slow ~2 s breathing cycle. */
+        breath_frame_ms = (uint16_t)(breath_frame_ms + TICK_MS);
+        if (breath_frame_ms >= DIAG_LED_BREATH_FRAME_MS)
+        {
+            breath_frame_ms = (uint16_t)(breath_frame_ms - DIAG_LED_BREATH_FRAME_MS);
+            breath_phase = (uint8_t)((breath_phase + 1U) % 10U);
+        }
+        breath_step_ms = (uint16_t)(breath_step_ms + TICK_MS);
+        if (breath_step_ms >= DIAG_LED_BREATH_STEP_MS)
+        {
+            breath_step_ms = (uint16_t)(breath_step_ms - DIAG_LED_BREATH_STEP_MS);
+            if (breath_rising)
+            {
+                if (breath_duty >= 90U)
+                {
+                    breath_rising = 0U;
+                    breath_duty = 80U;
+                }
+                else
+                {
+                    breath_duty = (uint8_t)(breath_duty + 10U);
+                }
+            }
+            else if (breath_duty <= 10U)
+            {
+                breath_rising = 1U;
+                breath_duty = 20U;
+            }
+            else
+            {
+                breath_duty = (uint8_t)(breath_duty - 10U);
+            }
+        }
+        led3 = ((uint16_t)breath_phase * 10U < breath_duty) ?
+               BSP_IO_LEVEL_HIGH : BSP_IO_LEVEL_LOW;
+    }
+
     R_IOPORT_PinWrite(&g_ioport_ctrl, DIAG_LED1_PIN, led1);
     R_IOPORT_PinWrite(&g_ioport_ctrl, DIAG_LED2_PIN, led2);
-    R_IOPORT_PinWrite(&g_ioport_ctrl, DIAG_LED3_PIN, *heartbeat_level);
+    R_IOPORT_PinWrite(&g_ioport_ctrl, DIAG_LED3_PIN, led3);
 }
 
 unsigned char usb_uart_send_buff[100];
@@ -664,9 +728,6 @@ static void wifi_uart_rx_process (void)
 
 void hal_entry(void)
 {
-    uint32_t diag_elapsed_ms = 0U;
-    bsp_io_level_t heartbeat_level = BSP_IO_LEVEL_HIGH;
-
     /* Open the uart instances with initial configuration. */
     err = R_SCI_UART_Open(&g_usb_uart_ctrl, &g_usb_uart_cfg);
     assert(FSP_SUCCESS == err);
@@ -730,13 +791,8 @@ void hal_entry(void)
         R_BSP_SoftwareDelay(TICK_MS, BSP_DELAY_UNITS_MILLISECONDS);
         STAGE_MARK('.');
 
-        /* 不依赖 printf / USB TX 的纯 GPIO 主循环心跳。 */
-        diag_elapsed_ms += TICK_MS;
-        if (diag_elapsed_ms >= DIAG_LED_UPDATE_MS)
-        {
-            diag_elapsed_ms = 0U;
-            diag_led_service(&heartbeat_level);
-        }
+        /* GPIO-only status indicators; LED3 breathes only when no activity. */
+        diag_led_service();
         diag_main_loops++;
         diag_main_stage = 0U;
     }
