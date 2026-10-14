@@ -119,7 +119,7 @@ static struct {
     bool    sntp_done;          /**< AT+NWSNTP 已投递 */
     bool    time_check_pending;  /**< SNTP 后延时验证 AT+TIME */
     uint32_t time_check_due_ms;  /**< SNTP 后验证时间的截止时刻 */
-    bool    refresh_pending;     /**< 按键请求的刷新，网络不可用时保留 */
+    bool    refresh_pending;     /**< 手动刷新请求，网络不可用时保留 */
     uint8_t tz_fail;            /**< TZONE 连续失败次数, 到 TZ_MAX_FAIL 就不再堵链路 */
     char    time_str[6];        /**< 最近一次 AT+TIME 的 "HH:MM" */
 
@@ -1139,14 +1139,9 @@ void weather_task_poll (void)
 {
     uint32_t now = at_engine_now_ms();
 
-    /* ---------- 1. 按键（最先处理，保证任何状态下即时响应） ----------
-     * 映射按 DESIGN §6（板上 4 键 = 2 机械 + 2 触摸）：
-     *   机械键1 P005: 短按=刷新 / 双击=翻页 / 长按3s=配网(阶段4)
-     *   机械键2 P006: 单击=翻页
-     *   触摸键1 TS11: 单击=刷新        （阶段3 接入）
-     *   触摸键2 TS12: 单击=翻页/长按配网（阶段3 接入）
-     * 触摸键用 key_id_t 区分即可，本函数不需要改，阶段3 只要让
-     * key_scan 能报出 KEY_ID_TOUCH1/2 就能自动生效。 */
+    /* Always scan/drain keys before networking or AT state handling.
+     * Mechanical SW1/P005: short=queue refresh, double=page, long=provisioning hook.
+     * SW2/P006: click=page. Touch IDs use the same event mapping once CTSU is enabled. */
     key_poll(now);
     for (;;)
     {
@@ -1158,7 +1153,7 @@ void weather_task_poll (void)
             break;
         }
 
-        /* 机械键2 / 触摸键2：单击=翻页（不做三态，省一次双击等待） */
+        /* SW2/P006 and touch2: click=page (no double-click delay). */
         if ((KEY_ID_MECH2 == id) || (KEY_ID_TOUCH2 == id))
         {
             if (KEY_EVT_LONG == e)
@@ -1176,7 +1171,7 @@ void weather_task_poll (void)
             continue;
         }
 
-        /* 机械键1 / 触摸键1：三态 */
+        /* SW1/P005 and touch1: short/double/long state machine. */
         switch (e)
         {
             case KEY_EVT_SHORT:
@@ -1192,7 +1187,7 @@ void weather_task_poll (void)
                     s.connect_t0 = now;
                     s.ladder_sig = 0xFFFFU;
                     s.ui_dirty = true;
-                    printf("[wx] key refresh restarts Wi-Fi connection ladder\r\n");
+                    printf("[wx] queued refresh restarts Wi-Fi connection ladder\r\n");
                 }
                 s.ui_dirty = true;
                 break;
@@ -1393,7 +1388,7 @@ void weather_task_poll (void)
                 fetch_weather_start())
             {
                 s.refresh_pending = false;
-                printf("[wx] queued key refresh issued\r\n");
+                    printf("[wx] queued manual refresh issued\r\n");
             }
         }
         /* 4b. Weather refresh due */

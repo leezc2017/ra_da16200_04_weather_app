@@ -10,7 +10,7 @@
 - **板载 LED**：LED1/P045 联网中约 200 ms 节拍闪烁、连接成功常亮；LED2/P044 天气请求中闪烁、天气有效后常亮；LED3/P002 在联网/天气请求活动期间熄灭，空闲时慢速呼吸（约 2 秒周期）。GPIO 高电平点亮，固件运行时配置。
 - **RA 主栈**：`configuration.xml` 中 `config.bsp.common.main=0x1000`（4 KB）。2026-10-14 曾观察到 1 KB 栈版本在天气 UI 路径发生 INVSTATE HardFault，PC 落入主栈区；4 KB 版本已实测跑通 SNTP、now/daily HTTP 200、解析并持续心跳。栈配置应通过 RASC 生成，不要只改 `bsp_cfg.h`。
 - **状态诊断**：`[hb] eng=0` 表示 AT 引擎闲置，此时 `mode=0`；`loop/stage/wrx/urx/wtx` 分别是主循环次数、最近主循环阶段、已处理 Wi‑Fi/USB RX 字节和 Wi‑Fi TX 完成次数。若发生 Cortex-M Fault，现场保存在 `.ram_noinit`，硬件 RESET 后可打印 `[FAULT]`；彻底断电不保证保留。
-- **按键**：SW1/P005 短按刷新、双击翻页、长按预留配网；SW2/P006 单击翻页。刷新在启动联网中排队，`[hb] rq=1` 表示尚待发送。TS11/TS12 触摸仍待 RASC 加入 CTSU/RM_TOUCH 组件；目前仅 pin mux 已配置，不会触摸产生按键事件。
+- **按键**：SW1/P005 短按刷新、双击翻页、长按预留配网；SW2/P006 单击翻页。刷新在启动联网中排队，`[hb] rq=1` 表示尚待发送；Wi-Fi 进入 FAIL 后再短按会重启连接阶梯。TS11/TS12 触摸仍待 RASC 加入 CTSU/RM_TOUCH 组件；目前仅 pin mux 已配置，不会触摸产生按键事件。
 - SoftAP 模式切换和网页配置 SSID/密码/城市仍属于 DESIGN.md §7 阶段4；当前阶段不实现网页配网。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。
