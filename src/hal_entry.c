@@ -12,6 +12,7 @@
 #include "weather_text.h"
 #include "weather_ui.h"
 #include "weather_task.h"
+#include "weather_http.h"
 #include "weather_parse.h"
 #include "key_scan.h"
 
@@ -48,8 +49,187 @@
 #define RX_RING_SIZE      (8192U)     /* WIFI RX 环形缓冲: 容 2KB+ 突发(WFSCAN 实测 ~1.9KB) */
 #define RX_LINE_MAX       (256U)      /* 单行最大长度 */
 #define WIFI_TX_WAIT_MS   (200U)      /* 透传发送等待 TX 完成的兜底超时 */
+#define RX_PROCESS_BUDGET (256U)      /* 每轮最多处理字节数，防止 ISR 持续入流饿死主循环 */
+
+/* 原理图确认：LED1=P045、LED2=P044、LED3=P002；GPIO 高电平点亮。
+ * 语义：LED1 Wi-Fi连接中闪/连接后常亮；LED2 天气请求中闪/天气有效常亮；
+ * LED3 主循环心跳。引脚在 R_IOPORT_Open 后运行时配置。 */
+#define DIAG_LED1_PIN            BSP_IO_PORT_04_PIN_05
+#define DIAG_LED2_PIN            BSP_IO_PORT_04_PIN_04
+#define DIAG_LED3_PIN            BSP_IO_PORT_00_PIN_02
+#define DIAG_LED_UPDATE_MS      (200U)
+
+/* Low-overhead runtime breadcrumbs, included in HB snapshots. */
+volatile uint32_t diag_main_loops;
+volatile uint32_t diag_wifi_rx_processed;
+volatile uint32_t diag_usb_rx_processed;
+volatile uint8_t  diag_main_stage;
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t exc_return;
+    uint32_t r0, r1, r2, r3, r12, lr, pc, xpsr;
+    uint32_t cfsr, hfsr, dfsr, afsr, mmfar, bfar;
+    uint32_t stage;
+    uint32_t loops;
+} fault_record_t;
+
+/* .ram_noinit survives normal C runtime zero-init, allowing the next boot to report a fault. */
+__attribute__((section(".ram_noinit"), used)) volatile fault_record_t g_fault_record;
+
+void fault_capture(uint32_t *stacked, uint32_t exc_return) __attribute__((noreturn));
+void fault_capture(uint32_t *stacked, uint32_t exc_return)
+{
+    g_fault_record.magic = 0xFA017EADUL;
+    g_fault_record.exc_return = exc_return;
+    if (stacked != NULL)
+    {
+        /* With hard-float, an extended FP exception frame has 18 FP words
+         * before the eight core registers. EXC_RETURN bit 4 = 0 selects it. */
+        if (0U == (exc_return & (1UL << 4)))
+        {
+            stacked += 18U;
+        }
+        g_fault_record.r0 = stacked[0];
+        g_fault_record.r1 = stacked[1];
+        g_fault_record.r2 = stacked[2];
+        g_fault_record.r3 = stacked[3];
+        g_fault_record.r12 = stacked[4];
+        g_fault_record.lr = stacked[5];
+        g_fault_record.pc = stacked[6];
+        g_fault_record.xpsr = stacked[7];
+    }
+    g_fault_record.cfsr = SCB->CFSR;
+    g_fault_record.hfsr = SCB->HFSR;
+    g_fault_record.dfsr = SCB->DFSR;
+    g_fault_record.afsr = SCB->AFSR;
+    g_fault_record.mmfar = SCB->MMFAR;
+    g_fault_record.bfar = SCB->BFAR;
+    g_fault_record.stage = diag_main_stage;
+    g_fault_record.loops = diag_main_loops;
+    __DSB();
+    while (1) { __NOP(); }
+}
+
+void HardFault_Handler(void);
+void MemManage_Handler(void);
+void BusFault_Handler(void);
+void UsageFault_Handler(void);
+
+__attribute__((naked)) void HardFault_Handler(void)
+{
+    __asm volatile ("tst lr, #4\n"
+                    "ite eq\n"
+                    "mrseq r0, msp\n"
+                    "mrsne r0, psp\n"
+                    "mov r1, lr\n"
+                    "b fault_capture\n");
+}
+
+__attribute__((naked)) void MemManage_Handler(void)
+{
+    __asm volatile ("tst lr, #4\n"
+                    "ite eq\n"
+                    "mrseq r0, msp\n"
+                    "mrsne r0, psp\n"
+                    "mov r1, lr\n"
+                    "b fault_capture\n");
+}
+
+__attribute__((naked)) void BusFault_Handler(void)
+{
+    __asm volatile ("tst lr, #4\n"
+                    "ite eq\n"
+                    "mrseq r0, msp\n"
+                    "mrsne r0, psp\n"
+                    "mov r1, lr\n"
+                    "b fault_capture\n");
+}
+
+__attribute__((naked)) void UsageFault_Handler(void)
+{
+    __asm volatile ("tst lr, #4\n"
+                    "ite eq\n"
+                    "mrseq r0, msp\n"
+                    "mrsne r0, psp\n"
+                    "mov r1, lr\n"
+                    "b fault_capture\n");
+}
 
 fsp_err_t err = FSP_SUCCESS;
+
+static void diag_led_init(void)
+{
+    const uint32_t pins[] = {
+        DIAG_LED1_PIN,
+        DIAG_LED2_PIN,
+        DIAG_LED3_PIN
+    };
+    size_t i;
+
+    for (i = 0U; i < (sizeof(pins) / sizeof(pins[0])); i++)
+    {
+        R_IOPORT_PinCfg(&g_ioport_ctrl, pins[i],
+                        (uint32_t) IOPORT_CFG_PORT_DIRECTION_OUTPUT |
+                        (uint32_t) IOPORT_CFG_PORT_OUTPUT_HIGH);
+        R_IOPORT_PinWrite(&g_ioport_ctrl, pins[i], BSP_IO_LEVEL_HIGH);
+    }
+}
+
+static void diag_fault_report(void)
+{
+    if (0xFA017EADUL == g_fault_record.magic)
+    {
+        printf("[FAULT] previous exception: pc=%08lx lr=%08lx xpsr=%08lx exc_return=%08lx\r\n",
+               (unsigned long)g_fault_record.pc, (unsigned long)g_fault_record.lr,
+               (unsigned long)g_fault_record.xpsr, (unsigned long)g_fault_record.exc_return);
+        printf("[FAULT] cfsr=%08lx hfsr=%08lx dfsr=%08lx afsr=%08lx mmfar=%08lx bfar=%08lx stage=%lu loops=%lu\r\n",
+               (unsigned long)g_fault_record.cfsr, (unsigned long)g_fault_record.hfsr,
+               (unsigned long)g_fault_record.dfsr, (unsigned long)g_fault_record.afsr,
+               (unsigned long)g_fault_record.mmfar, (unsigned long)g_fault_record.bfar,
+               (unsigned long)g_fault_record.stage, (unsigned long)g_fault_record.loops);
+        g_fault_record.magic = 0U;
+    }
+}
+
+static void diag_led_service(bsp_io_level_t * heartbeat_level)
+{
+    *heartbeat_level = (BSP_IO_LEVEL_HIGH == *heartbeat_level) ?
+                       BSP_IO_LEVEL_LOW : BSP_IO_LEVEL_HIGH;
+
+    wifi_status_t wifi = weather_task_wifi_status();
+    bool fetching = weather_http_busy();
+    bool weather_valid = weather_task_weather_valid();
+    bsp_io_level_t led1;
+    bsp_io_level_t led2;
+
+    if (WIFI_STAT_CONNECTED == wifi)
+    {
+        led1 = BSP_IO_LEVEL_HIGH;
+    }
+    else if ((WIFI_STAT_CONNECTING == wifi) || (WIFI_STAT_IDLE == wifi))
+    {
+        led1 = *heartbeat_level;              /* blink while attempting association */
+    }
+    else
+    {
+        led1 = BSP_IO_LEVEL_LOW;               /* failed/provisioning: off */
+    }
+
+    if (fetching)
+    {
+        led2 = *heartbeat_level;               /* blink while HTTP fetch is active */
+    }
+    else
+    {
+        led2 = weather_valid ? BSP_IO_LEVEL_HIGH : BSP_IO_LEVEL_LOW;
+    }
+
+    R_IOPORT_PinWrite(&g_ioport_ctrl, DIAG_LED1_PIN, led1);
+    R_IOPORT_PinWrite(&g_ioport_ctrl, DIAG_LED2_PIN, led2);
+    R_IOPORT_PinWrite(&g_ioport_ctrl, DIAG_LED3_PIN, *heartbeat_level);
+}
 
 unsigned char usb_uart_send_buff[100];
 volatile bool usb_uart_send_complete_flag = false;
@@ -398,10 +578,12 @@ static void rx_line_flush (void)
 /* 取出 USB 串口收到的数据, 收到换行符作为一行结束并转发给 WIFI 串口 */
 static void usb_uart_rx_process (void)
 {
-    while (rx_rd_index != rx_wr_index)
+    uint16_t budget = RX_PROCESS_BUDGET;
+    while ((rx_rd_index != rx_wr_index) && (budget > 0U))
     {
         char c = rx_ring[rx_rd_index];
         rx_rd_index = (uint16_t)((rx_rd_index + 1U) % RX_RING_SIZE);
+        budget--;
 
         if ((c == '\r') || (c == '\n'))     /* 换行符作为结束标志 */
         {
@@ -416,6 +598,7 @@ static void usb_uart_rx_process (void)
             rx_line_flush();
             rx_line[rx_line_len++] = c;
         }
+        diag_usb_rx_processed++;
     }
 }
 
@@ -451,10 +634,12 @@ static void wifi_rx_line_flush (void)
 /* 取出串口收到的数据, 收到换行符作为一行结束并打印 */
 static void wifi_uart_rx_process (void)
 {
-    while (wifi_rx_rd_index != wifi_rx_wr_index)
+    uint16_t budget = RX_PROCESS_BUDGET;
+    while ((wifi_rx_rd_index != wifi_rx_wr_index) && (budget > 0U))
     {
         char c = wifi_rx_ring[wifi_rx_rd_index];
         wifi_rx_rd_index = (uint16_t)((wifi_rx_rd_index + 1U) % RX_RING_SIZE);
+        budget--;
 
         at_engine_rx(c);                    /* 喂给 AT 引擎(状态机+URC识别) */
 
@@ -471,6 +656,7 @@ static void wifi_uart_rx_process (void)
             wifi_rx_line_flush();
             wifi_rx_line[wifi_rx_line_len++] = c;
         }
+        diag_wifi_rx_processed++;
     }
 }
 
@@ -478,12 +664,17 @@ static void wifi_uart_rx_process (void)
 
 void hal_entry(void)
 {
+    uint32_t diag_elapsed_ms = 0U;
+    bsp_io_level_t heartbeat_level = BSP_IO_LEVEL_HIGH;
+
     /* Open the uart instances with initial configuration. */
     err = R_SCI_UART_Open(&g_usb_uart_ctrl, &g_usb_uart_cfg);
     assert(FSP_SUCCESS == err);
 
     err = R_SCI_UART_Open(&g_wifi_uart_ctrl, &g_wifi_uart_cfg);
     assert(FSP_SUCCESS == err);
+
+    diag_led_init();
 
     /* ⚠ 编译时间/版本：每次改动后第一眼就能确认"烧的是不是最新固件"。
      * 格式固定为 "2026-10-04 12:34:56"，可直接和 Git 提交时间对照。
@@ -494,6 +685,8 @@ void hal_entry(void)
     printf("Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop\r\n");
     printf("Local: KEY = key pin levels now, HB = heartbeat snapshot now\r\n");
     printf("       WXTEST = parse the real seniverse body offline (no network)\r\n");
+
+    diag_fault_report();
 
     at_engine_init();
 #if WEATHER_UI_SERIAL_SIM
@@ -507,10 +700,14 @@ void hal_entry(void)
     {
         /* 先搬 RX 再延时: 缩短字节在环里的驻留时间, 避免突发响应丢字节。
          * 阶段标记字母用 STAGE_MARK 包起来, 默认是空操作(见上面的 CPU_STAGE_MARKERS)。 */
+        diag_main_stage = 1U; /* USB RX */
         STAGE_MARK('U'); usb_uart_rx_process();            /* USB 输入转发给 WIFI 串口 */
+        diag_main_stage = 2U; /* WIFI RX */
         STAGE_MARK('W'); wifi_uart_rx_process();           /* WIFI 返回打印到 USB */
+        diag_main_stage = 3U; /* USB TX */
         STAGE_MARK('T'); usb_tx_pump();                    /* 泵发 USB TX 环(非阻塞打印的兑现点) */
 
+        diag_main_stage = 4U; /* engine tick / task */
         STAGE_MARK('K'); at_engine_tick(TICK_MS);          /* 引擎时基 */
 
         /* ⚠ 引擎轮询只有一个调用点（DESIGN §4 单飞行）：
@@ -519,16 +716,29 @@ void hal_entry(void)
          * 二者互斥，由 at_probe_running() 判定，绝不能同时轮询。 */
         if (at_probe_running())
         {
+            diag_main_stage = 5U; /* probe */
             STAGE_MARK('P'); at_probe_poll();             /* AUTO / AUTOB 诊断中 */
         }
         else
         {
+            diag_main_stage = 6U; /* weather task */
             STAGE_MARK('X'); weather_task_poll();         /* 正常天气状态机 */
         }
 
+        diag_main_stage = 7U; /* delay */
         STAGE_MARK('D');
         R_BSP_SoftwareDelay(TICK_MS, BSP_DELAY_UNITS_MILLISECONDS);
         STAGE_MARK('.');
+
+        /* 不依赖 printf / USB TX 的纯 GPIO 主循环心跳。 */
+        diag_elapsed_ms += TICK_MS;
+        if (diag_elapsed_ms >= DIAG_LED_UPDATE_MS)
+        {
+            diag_elapsed_ms = 0U;
+            diag_led_service(&heartbeat_level);
+        }
+        diag_main_loops++;
+        diag_main_stage = 0U;
     }
 #if BSP_TZ_SECURE_BUILD
     /* Enter non-secure code */

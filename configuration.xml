@@ -100,7 +100,7 @@
       <property id="config.bsp.option_setting.bps_sel.0" value=""/>
     </config>
     <config id="config.bsp.ra">
-      <property id="config.bsp.common.main" value="0x400"/>
+      <property id="config.bsp.common.main" value="0x1000"/>
       <property id="config.bsp.common.heap" value="0x2000"/>
       <property id="config.bsp.common.bootloader.xip_enable" value="config.bsp.common.bootloader.xip_enable.disabled"/>
       <property id="config.bsp.common.vcc" value="3300"/>

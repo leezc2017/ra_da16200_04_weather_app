@@ -59,6 +59,7 @@ void         weather_task_result_line(char * buf, uint16_t size);
  * @return 五态之一
  */
 wifi_status_t weather_task_wifi_status(void);
+bool          weather_task_weather_valid(void);
 
 /**
  * @brief 触发一次天气刷新（按键短按用）

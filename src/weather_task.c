@@ -26,6 +26,7 @@
 
 #include "weather_task.h"
 #include "weather_cfg.h"
+
 #include "at_engine.h"
 #include "weather_http.h"
 #include "weather_parse.h"
@@ -116,6 +117,8 @@ static struct {
     bool    time_valid;         /**< 已拿到过有效时间 */
     bool    timezone_set;       /**< AT+TZONE 已成功下发 */
     bool    sntp_done;          /**< AT+NWSNTP 已投递 */
+    bool    time_check_pending;  /**< SNTP 后延时验证 AT+TIME */
+    uint32_t time_check_due_ms;  /**< SNTP 后验证时间的截止时刻 */
     uint8_t tz_fail;            /**< TZONE 连续失败次数, 到 TZ_MAX_FAIL 就不再堵链路 */
     char    time_str[6];        /**< 最近一次 AT+TIME 的 "HH:MM" */
 
@@ -152,6 +155,11 @@ static struct {
 extern volatile uint32_t usb_tx_drop_cnt;
 extern volatile uint32_t wifi_rx_drop_cnt;
 extern volatile uint32_t wifi_rx_byte_cnt;
+extern volatile uint32_t diag_main_loops;
+extern volatile uint32_t diag_wifi_rx_processed;
+extern volatile uint32_t diag_usb_rx_processed;
+extern volatile uint8_t diag_main_stage;
+extern volatile uint32_t wifi_tx_done_cnt;
 
 /**
  * @brief 低频心跳：确认主循环还活着、且引擎在收数据
@@ -331,10 +339,10 @@ static void hb_print (uint32_t now)
      *   tz=1 sntp=1 wx=0           -> 正在拉第一次天气
      *   wx=1                       -> 天气已就位，之后进入 15min 定时刷新
      * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）。 */
-    printf("[hb] up=%lus fsec=%us eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
-           "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
-           "kraw=%u%u res=%s/%d "
-           "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
+     printf("[hb] up=%lus fsec=%us eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
+            "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
+            "kraw=%u%u res=%s/%d loop=%lu stage=%u wrx=%lu urx=%lu wtx=%lu "
+            "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
            (unsigned long)(now / 1000UL),
            /* fsec= 本次 fetch 已等秒数(不在途时为 0)。2026-10-04 加:
             * 之前这行只有一个含糊的秒数, 我误把它读成"请求已发出多久",
@@ -347,9 +355,13 @@ static void hb_print (uint32_t now)
            (unsigned long)usb_tx_drop_cnt,
            (int)s.status,
            s.wx_valid ? s.wx.text : "--", s.wx_valid ? s.wx.temperature : 0,
-           (unsigned)k1, (unsigned)k2,
-           weather_task_last_result(), s_wxr.http,
-           (unsigned)(s.timezone_set ? 1U : 0U),
+            (unsigned)k1, (unsigned)k2,
+            weather_task_last_result(), s_wxr.http,
+            (unsigned long)diag_main_loops, (unsigned)diag_main_stage,
+            (unsigned long)diag_wifi_rx_processed,
+            (unsigned long)diag_usb_rx_processed,
+            (unsigned long)wifi_tx_done_cnt,
+            (unsigned)(s.timezone_set ? 1U : 0U),
            (unsigned)(s.sntp_done    ? 1U : 0U),
            (unsigned)(s.wx_valid     ? 1U : 0U),
            (unsigned)s.cmd,
@@ -809,6 +821,7 @@ static void on_cmd_done (at_result_t r)
             break;
 
         case CMD_TIME:
+            s.time_check_pending = false;
             if (take_time(time5, sizeof(time5), date11))
             {
                 snprintf(s.time_str, sizeof(s.time_str), "%s", time5);
@@ -845,9 +858,9 @@ static void on_cmd_done (at_result_t r)
         case CMD_SNTP:
             printf("[wx] SNTP %s (settle in %ums)\r\n",
                    (AT_RES_OK == r) ? "started" : "FAIL", (unsigned)SNTP_SETTLE_MS);
-            /* SNTP 生效需数秒: 把下次查时间提前到 +SNTP_SETTLE_MS */
-            s.time_poll_ms = (at_engine_now_ms() + SNTP_SETTLE_MS) -
-                             (WEATHER_TIME_POLL_MS);
+            /* SNTP 的 OK 仅代表命令被接受；延时后在已连接分支显式查 AT+TIME。 */
+            s.time_check_pending = true;
+            s.time_check_due_ms = at_engine_now_ms() + SNTP_SETTLE_MS;
             break;
 
         case CMD_WFSTA:
@@ -971,28 +984,28 @@ static void ui_refresh (void)
         if (s.wx_valid)
         {
             snprintf(mv.temp_str, sizeof(mv.temp_str), "%dC", s.wx.temperature);
-            /* ⚠ 用 code 查表而不是直接显示 API 的 now.text（2026-10-04）。
-             *
-             * 心知 API 返回 UTF-8（"晴" = E6 99 B4），而 OLED 点阵字模是按
+            /* 心知中文 API 文案是 UTF-8，而 OLED 点阵字模按
              * GB2312/GBK 索引的（oledfont.h 的 Hzk[]）。把 UTF-8 字节直接喂
              * OLED_ShowString 会按 GBK 拆成两个错字 —— 这不是本工程的移植
              * 遗漏：GD32 版 weather_ui.c / oled.c 与本工程**逐字节相同**，
              * 它同样如此（两边都没有编码转换）。
              *
-             * ★ 2026-10-13: 请求语言已改 WEATHER_LANG="en"（weather_cfg.h）。
-             *   英文是纯 ASCII，不存在 UTF-8/GBK 错位 —— 若哪天要直接显示
-             *   now.text，English 这条路反而是通的。但本工程仍走 code 查表
-             *   （见下），与返回语言无关，因此换语言不需要改显示逻辑。
-             *
              * 而中文这条路目前根本铺好：oled_font_data/oled_cn_font.c 里
              * 只有占位记录、没有任何真实字模数据，oledfont.h 的 Hzk[] 也只有
-             * 7 个汉字。所以先走 weather_text_get(code) 的英文表 ——
-             * 纯 ASCII，与字库匹配，必然正确。weather_text.h 里本来就规定
-             * "一律用 code 匹配，不要用 now.text 直接 strcmp"。
-             * s.wx.text 仍保留在 [WX-RESULT] 日志里便于核对。
-             * 待 tools/glyph2c.py 生成中文字模表后，再切回中文显示。 */
-            snprintf(mv.wtext, sizeof(mv.wtext), "%s",
-                     weather_text_get(s.wx.code));
+             * 7 个汉字。英文模式可直接显示 ASCII now.text；非英文模式暂用 code
+             * 表兜底，待中文字模生成后再接入完整 UTF-8 到 GBK 显示转换。 */
+            /* WEATHER_LANG=en yields ASCII now.text, so show the API's actual
+             * condition. Code-table fallback is for non-English/UTF-8 UI paths.
+             * This avoids code 5 Foggy being mislabeled as code 30 Sandst. */
+            if (0 == strcmp(WEATHER_LANG, "en"))
+            {
+                snprintf(mv.wtext, sizeof(mv.wtext), "%.15s", s.wx.text);
+            }
+            else
+            {
+                snprintf(mv.wtext, sizeof(mv.wtext), "%s",
+                         weather_text_get(s.wx.code));
+            }
             if (s.wx.humidity >= 0)
             {
                 snprintf(mv.humidity_str, sizeof(mv.humidity_str), "%d",
@@ -1112,6 +1125,11 @@ void weather_task_refresh_now (void)
 wifi_status_t weather_task_wifi_status (void)
 {
     return s.status;
+}
+
+bool weather_task_weather_valid (void)
+{
+    return s.wx_valid;
 }
 
 void weather_task_poll (void)
@@ -1362,7 +1380,18 @@ void weather_task_poll (void)
         /* 4b. 联网后初始化链路: 查 IP -> 设时区 -> SNTP */
         else if (s.status == WIFI_STAT_CONNECTED)
         {
-            if (!s.timezone_set && (CMD_NONE == s.cmd))
+            if (s.time_check_pending)
+            {
+                /* Match the measured/manual sequence: finish the delayed TIME
+                 * verification before starting the first weather HTTP request. */
+                if (((int32_t)(at_engine_now_ms() - s.time_check_due_ms) >= 0) &&
+                    (CMD_NONE == s.cmd))
+                {
+                    s.time_poll_ms = now;
+                    (void)at_send_owned("AT+TIME", 2500U, CMD_TIME);
+                }
+            }
+            else if (!s.timezone_set && (CMD_NONE == s.cmd))
             {
                 char cmd[48];
                 snprintf(cmd, sizeof(cmd), "AT+TZONE=%d", (int)(WEATHER_TZ_HOURS * 3600));

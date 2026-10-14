@@ -121,7 +121,7 @@ void at_engine_diag(at_engine_diag_t * out)
     }
 
     out->state      = (uint8_t)s.state;
-    out->mode       = (uint8_t)s.mode;
+    out->mode       = (ST_IDLE == s.state) ? (uint8_t)AT_MODE_CMD : (uint8_t)s.mode;
     out->urc_cnt    = s.urc_cnt;
     out->seen_cnt   = s.seen_cnt;
     out->line_len   = s.line_len;
@@ -143,7 +143,7 @@ bool at_engine_idle(void)
 /** @brief 当前模式(AT_MODE_CMD=0 / AT_MODE_PAYLOAD=1)。供串口提示用 */
 uint8_t at_engine_mode(void)
 {
-    return (uint8_t)s.mode;
+    return (ST_IDLE == s.state) ? (uint8_t)AT_MODE_CMD : (uint8_t)s.mode;
 }
 
 const at_resp_t * at_engine_resp(void)

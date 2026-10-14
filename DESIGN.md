@@ -1,6 +1,6 @@
 # 4.weather_app — RA4M2 + DA16200 天气显示站 实现思路
 
-> 状态：**方案评审完成；阶段1已完成，阶段2天气链路与串口 OLED 模拟已接入，待编译和板级验证**
+> 状态：**RA4M2 + DA16200 天气主链路已完成板级验证；主栈扩展至 4 KB 后实测完成 SNTP、HTTP 200、JSON 解析和持续心跳**
 > 参考实现：GD32VW553 版 `..\..\..\GD32\workspace\GD32VW553\4.weather_app`
 > 基础工程：RA 版 `.`（USB↔WIFI 透传桥）
 
@@ -19,7 +19,7 @@
 |---|---|---|
 | 网络 | 片上 WiFi + lwip socket，代码直接 `getaddrinfo/recv` | **无网络能力**，全部经 AT 命令驱动 DA16200 |
 | HTTP | `weather_http.c` 裸 socket 收包 | `AT+NWHTC=<url>,get`，payload 由模块回传 |
-| SNTP | lwip `sntp_start_once()` + 时间钩子 | `AT+NWSNTP=1,ntp.aliyun.com,86400`，读时命令待调研 |
+| SNTP | lwip `sntp_start_once()` + 时间钩子 | `AT+NWSNTP=1,ntp.aliyun.com,86400`；等待 8 秒后用 `AT+TIME` 验证 |
 | 解析 | SDK cJSON | **移植单文件 cJSON**（MIT） |
 | OS | FreeRTOS 多任务 | **裸机 while(1) 状态机**（沿用桥工程 10ms 节拍，不开 RTOS） |
 | 凭据存储 | MCU Flash `wifi_credential_t` | WiFi 凭据存 **DA16200 NVRAM**（`AT+WFJAPA` 自动保存）；城市见 §8 |
@@ -116,7 +116,7 @@ at_result_t at_engine_poll(void);       /* 每 tick 调用，非阻塞 */
 |---|---|---|
 | 联网 | `wifi_prov_start()` 阻塞重试3次 | **阶梯式，每级 8s（`WEATHER_CONNECT_TIMEOUT_MS`）**：`AT+NWIP=?` 主动查 IP（最快，免疫一次性 URC）→ 短等 `+WFJAP:1` URC（覆盖 RA 先起/模块后起的冷启动）→ `AT+WFCAP`（用 NVRAM profile）→ `AT+WFJAPA=<ssid>,<pwd>`（显式连 + 写 NVRAM，30s）。WFJAPA 连续失败 3 次回退到第一级重跑 |
 | 取 IP | `wifi_get_ip()` | **主动 `AT+NWIP=?` 查询**（首选），从 `+NWIP:0,<ip>,<mask>,<gw>` 取第 2 字段；`+WFJAP:1,'ssid',<ip>` 走 `parse_ip()` 同一套解析（找第一个 `d.d.d.d`）。⚠ 早期版本"只从 URC 取 IP、不发 `AT+NWIP=?`"，因为该查询曾因长响应丢字节超时（风险#5）；风险#5 修好后查询已可靠，且**主动查询是唯一能免疫"URC 一次性、RA 没赶上"的办法**，故改为主路径 |
-| 对时 | lwip SNTP 钩子 | **不使用 RA 内部 RTC**（用户已确认）。实测：`AT+TZONE=28800`（**单位确为秒**）+ `AT+NWSNTP=1,ntp.aliyun.com,86400` → `AT+TIME` 回 `+TIME:2026-10-03,11:30:51`（真实本地时间）。主页时钟每分钟查一次 `AT+TIME` |
+| 对时 | lwip SNTP 钩子 | **不使用 RA 内部 RTC**（用户已确认）。实测：`AT+TZONE=28800`（**单位确为秒**）+ `AT+NWSNTP=1,ntp.aliyun.com,86400` → 延时 `AT+TIME` 回报真实本地时间（UTC+8）。主页时钟每分钟查一次 `AT+TIME` |
 | 拉天气 | 裸 socket GET，4KB 收包缓冲 | `AT+NWHTC=<seniverse now.json>,get` **PAYLOAD 模式**。✅ **裸 URL 即可，不要单引号**（风险#3 已清零：裸/引号结果完全一致 `len=690 body_len=274`）；✅ URL 含 `&`/`?` **不需转义**（URI 是第一个逗号前的单参数）；⚠ 串长必须 < `AT_CMD_MAX`(180) |
 | 解析 | cJSON：`results[0].now.text/code/temperature` + `last_update` | **原样移植** `weather_parse.c`。实测 `hdr_sep=1`（**含 HTTP 响应头**）→ 必须先切 `\r\n\r\n`；切完 `json_direct=1`（正文首字符 `{`）→ 可直喂 cJSON |
 | 刷新 | 15min：主循环按分钟计数 | 相同，挂在主状态机 tick 上（桥工程已有 10ms 节拍，累计秒/分） |
@@ -143,6 +143,31 @@ at_result_t at_engine_poll(void);       /* 每 tick 调用，非阻塞 */
     | 触摸键2 | 单击=翻页；长按=进入配网（备用） |
   - 触摸键接入注意：需把 `RA4M2TOUCH` 的 CTSU 外设配置合并进本工程 configuration.xml（`hal_data`/`pin_data` 同步），此一步**可能需要 e2studio 打开生成一次**——阶段3 先评估"手工合并 vs e2studio 一次配置"，评估结论回报后再动
 - 板载 LED：P044/P045/P002（可作状态指示）
+
+### 6.1 板载 LED 状态定义
+
+| LED | MCU 引脚 | 含义 | 表现 |
+|---|---|---|---|
+| LED1 | P045 | Wi-Fi 状态 | 连接中闪烁；连接成功常亮；失败/配网状态熄灭 |
+| LED2 | P044 | 天气状态 | HTTP 天气请求在途时闪烁；成功取到天气后常亮；尚无有效天气时熄灭 |
+| LED3 | P002 | 主循环心跳 | 约 200 ms 翻转，完整亮灭周期约 400 ms；停止表示主循环未到心跳更新点 |
+
+三灯高电平点亮，由 `hal_entry.c` 在 `R_IOPORT_Open()` 后动态配置，不在当前
+`ra_gen/pin_data.c` 的 FSP 引脚表中。LED2 仅表示数据是否有效，不区分请求失败和
+尚未请求；失败原因以 `[hb] res=` 为准。网络一旦曾连上，断线重连期间 LED1 会熄灭，
+重新进入 CONNECTING 后闪烁。
+
+### 6.2 主栈配置与已知 HardFault 根因
+
+RA4M2 的裸机主栈由 `configuration.xml` 的 `config.bsp.common.main` 配置；当前为
+`0x1000`（4 KB），RASC 生成值在 `ra_cfg/fsp_cfg/bsp/bsp_cfg.h`。不要只手改生成头文件。
+
+故障实测（2026-10-14）：1 KB 栈版本保存的 HardFault 现场为 `CFSR=0x00100000`
+(INVSTATE)、`HFSR=0x40000000`、`stage=6`；堆栈 PC=`0x20002292` 落在 map 中
+`g_main_stack` 的 `0x200021e0..0x200025e0` 区间，且当时位于天气 UI 刷新路径。
+扩至 4 KB 后，板级日志成功完成 `AT+TIME`、now/daily HTTP 200、JSON 解析并持续输出
+心跳（loop 计数增长）。这是栈/返回地址破坏的强证据，4 KB 修复已实测有效；若将来
+增加深层调用或大型局部变量，仍需重新检查栈余量。
 
 ## 7. 实施阶段（每阶段独立可验收）
 

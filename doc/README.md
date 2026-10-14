@@ -4,7 +4,11 @@
 
 本工程是 **RA4M2 + DA16200 天气显示站**（复刻 GD32VW553 版 `4.weather_app`），总体方案见根目录 `DESIGN.md`。
 
-- **当前状态（阶段2，串口 OLED 模拟）**：天气状态机使用固定 WiFi 凭据，心知天气按 `location=ip` 获取；主页与 WiFi 信息页通过 USB 串口输出 128×32 OLED 的四行内容。真实 OLED 未连接时跳过 OLED 初始化。
+- **当前状态（阶段2，串口 OLED 模拟）**：已实测 Wi-Fi、SNTP/AT+TIME、now/daily HTTP 200、JSON 解析和持续心跳；天气状态机使用固定 Wi-Fi 凭据，心知天气按 `location=ip` 获取。主页与 Wi-Fi 信息页通过 USB 串口输出 128×32 OLED 四行内容。真实 OLED 未连接时跳过 OLED 初始化。
+- **NTP 配置**：主服务器为 `ntp.aliyun.com`，备用 `pool.ntp.org`。模块返回 NWSNTP `OK` 后等待 8 秒，再查询 `AT+TIME` 验证；时间查询完成后开始天气 HTTP 请求。
+- **板载 LED**：LED1/P045 联网中闪烁、连接成功常亮；LED2/P044 天气请求中闪烁、天气有效后常亮；LED3/P002 主循环心跳（约 200 ms 更新）。GPIO 高电平点亮，固件运行时配置。
+- **RA 主栈**：`configuration.xml` 中 `config.bsp.common.main=0x1000`（4 KB）。2026-10-14 曾观察到 1 KB 栈版本在天气 UI 路径发生 INVSTATE HardFault，PC 落入主栈区；4 KB 版本已实测跑通 SNTP、now/daily HTTP 200、解析并持续心跳。栈配置应通过 RASC 生成，不要只改 `bsp_cfg.h`。
+- **状态诊断**：`[hb] eng=0` 表示 AT 引擎闲置，此时 `mode=0`；`loop/stage/wrx/urx/wtx` 分别是主循环次数、最近主循环阶段、已处理 Wi‑Fi/USB RX 字节和 Wi‑Fi TX 完成次数。若发生 Cortex-M Fault，现场保存在 `.ram_noinit`，硬件 RESET 后可打印 `[FAULT]`；彻底断电不保证保留。
 - SoftAP 模式切换和网页配置 SSID/密码/城市仍属于 DESIGN.md §7 阶段4；当前阶段不实现网页配网。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。
@@ -369,7 +373,7 @@ ATF                    恢复出厂（清 NVRAM）
 心知 API ──UTF-8──> cJSON ──code查表──> 英文文案(ASCII) ──> OLED
 ```
 
-- **一律用 weather code 查表**（`weather_text_get(code)`），**不要拿 `now.text` 做 `strcmp`** —— 编码不同必然失配。
+- 天气解析以 `code` 作为稳定的天气类别/图标依据。当前 `WEATHER_LANG="en"` 时 API 的 `now.text` 是 ASCII，主页直接显示该字段，以保证屏显与 API/`[WX-RESULT]` 一致（例如 Foggy）；非英文时继续走本地 code 文案表，避免把 UTF-8 文案直接送入 GBK OLED 字库。
 - 需要上中文时用 `oled_utf8_to_gbk()` 转码后查 `oled_cn_1212`/`oled_cn_1616`。
 - `oledfont.h` 自带的 `Hzk[]` 只有 7 个汉字，不够用；扩充用：
   ```
@@ -508,4 +512,3 @@ git commit      # 提交信息要说明【为什么】改，而不只是改了�
 | — | 心知 JSON 的实际 `body_len`，4KB 是否够 | `AUTO` 步 10 的 `body_len`/`ovf` | 待测 |
 | — | `AT+PROVSTART`/`AT+PROVSTAT`（模块自带配网）能否替代自建 HTTP 服务 | `HELP AT+PROVSTART`（阶段4 决策点） | 待测 |
 | — | `AT+TZONE` 改时区后 `AT+TIME` 是否随之偏移（验证单位语义） | 手工 `AT+TZONE=0` → `AT+TIME` → `AT+TZONE=28800` → `AT+TIME` | 待测 |
-
