@@ -1,5 +1,6 @@
 /* generated HAL source file - do not edit */
 #include "hal_data.h"
+#include "qe_gen/qe_touch_config.h"
 sci_uart_instance_ctrl_t g_wifi_uart_ctrl;
 
 baud_setting_t g_wifi_uart_baud_setting =

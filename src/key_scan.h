@@ -4,7 +4,7 @@
  *
  * 移植自 GD32VW553 版 4.weather_app/src/key_scan.h，
  * 状态机逻辑（三态判定 + 双击等待 + 长按抢占）逐行保留，
- * 仅 GPIO 读取方式从 gd32vw55x_gpio.h 换成 R_IOPORT_PinRead。
+ * 机械键用 R_IOPORT_PinRead，触摸键使用 FSP RM_TOUCH 按钮位图。
  *
  * 事件用 FIFO 而非单标志（DESIGN §8.1 根因1 对策）：
  *   10ms tick 下标志位可能在两次 poll 之间被覆盖，
@@ -37,7 +37,7 @@ typedef enum {
 #define KEY_EVT_FIFO_DEPTH   8U
 
 /**
- * @brief 初始化按键 GPIO 与状态机
+ * @brief 初始化机械/触摸键状态机，并打开 QE Touch
  *
  * 必须在主循环开始前调用一次。引脚由 weather_cfg.h 的
  * WEATHER_KEY_PORT / WEATHER_KEY_PIN 决定。
@@ -49,6 +49,9 @@ void key_init(void);
  * @param now_ms 单调递增毫秒计数
  */
 void key_poll(uint32_t now_ms);
+
+/** @brief 非阻塞推进一次 CTSU 扫描；由 key_poll 内部按扫描周期调用 */
+void key_touch_poll(uint32_t now_ms);
 
 /**
  * @brief 取一个事件（消费型）

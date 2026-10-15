@@ -6,13 +6,16 @@
         #endif
 /* Number of interrupts allocated */
 #ifndef VECTOR_DATA_IRQ_COUNT
-#define VECTOR_DATA_IRQ_COUNT    (8)
+#define VECTOR_DATA_IRQ_COUNT    (11)
 #endif
 /* ISR prototypes */
 void sci_uart_rxi_isr(void);
 void sci_uart_txi_isr(void);
 void sci_uart_tei_isr(void);
 void sci_uart_eri_isr(void);
+void ctsu_write_isr(void);
+void ctsu_read_isr(void);
+void ctsu_end_isr(void);
 
 /* Vector table allocations */
 #define VECTOR_NUMBER_SCI9_RXI ((IRQn_Type) 0) /* SCI9 RXI (Receive data full) */
@@ -32,7 +35,13 @@ void sci_uart_eri_isr(void);
 #define VECTOR_NUMBER_SCI0_ERI ((IRQn_Type) 7) /* SCI0 ERI (Receive error) */
 #define SCI0_ERI_IRQn          ((IRQn_Type) 7) /* SCI0 ERI (Receive error) */
 /* The number of entries required for the ICU vector table. */
-#define BSP_ICU_VECTOR_NUM_ENTRIES (8)
+#define BSP_ICU_VECTOR_NUM_ENTRIES (11)
+#define VECTOR_NUMBER_CTSU_WRITE ((IRQn_Type) 8)
+#define CTSU_WRITE_IRQn          ((IRQn_Type) 8)
+#define VECTOR_NUMBER_CTSU_READ ((IRQn_Type) 9)
+#define CTSU_READ_IRQn          ((IRQn_Type) 9)
+#define VECTOR_NUMBER_CTSU_END ((IRQn_Type) 10)
+#define CTSU_END_IRQn           ((IRQn_Type) 10)
 
 #ifdef __cplusplus
         }

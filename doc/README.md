@@ -6,12 +6,12 @@
 
 - **当前状态（阶段2，串口 OLED 模拟）**：已实测 Wi-Fi、SNTP/AT+TIME、now/daily HTTP 200、JSON 解析和持续心跳；天气状态机使用固定 Wi-Fi 凭据，心知天气按 `location=ip` 获取。主页与 Wi-Fi 信息页通过 USB 串口输出 128×32 OLED 四行内容。真实 OLED 未连接时跳过 OLED 初始化。
 - **NTP 配置**：主服务器为 `ntp.aliyun.com`，备用 `pool.ntp.org`。模块返回 NWSNTP `OK` 后等待 8 秒，再查询 `AT+TIME` 验证；时间查询完成后开始天气 HTTP 请求。
-- **天气指标与按键**：now JSON 的可选 humidity/wind_speed 若缺失，会尝试使用 daily JSON 同名字段补齐；仍为 `--` 表示两次响应都没提供值。P005 短按在未联网/AT 忙时排队，联网后执行；P005 双击和 P006 单击翻页。触摸键目前尚未接入 CTSU 扫描。
+- **天气指标与按键**：now JSON 的可选 humidity/wind_speed 若缺失，会尝试使用 daily JSON 同名字段补齐；仍为 `--` 表示两次响应都没提供值。P005 短按在未联网/AT 忙时排队，联网后执行；P005 双击和 P006 单击翻页。CTSU TS11/TS12 的 FSP 6.6 QE Touch 文件和构建规则已接入，`make -B -j8 all` 可完整链接；触摸阈值及触摸事件仍未完成板上验收。
 - **板载 LED**：LED1/P045 联网中约 200 ms 节拍闪烁、连接成功常亮；LED2/P044 天气请求中闪烁、天气有效后常亮；LED3/P002 在联网/天气请求活动期间熄灭，空闲时慢速呼吸（约 2 秒周期）。GPIO 高电平点亮，固件运行时配置。
 - **RA 主栈**：`configuration.xml` 中 `config.bsp.common.main=0x1000`（4 KB）。2026-10-14 曾观察到 1 KB 栈版本在天气 UI 路径发生 INVSTATE HardFault，PC 落入主栈区；4 KB 版本已实测跑通 SNTP、now/daily HTTP 200、解析并持续心跳。栈配置应通过 RASC 生成，不要只改 `bsp_cfg.h`。
 - **状态诊断**：`[hb] eng=0` 表示 AT 引擎闲置，此时 `mode=0`；`loop/stage/wrx/urx/wtx` 分别是主循环次数、最近主循环阶段、已处理 Wi‑Fi/USB RX 字节和 Wi‑Fi TX 完成次数。若发生 Cortex-M Fault，现场保存在 `.ram_noinit`，硬件 RESET 后可打印 `[FAULT]`；彻底断电不保证保留。
-- **按键**：SW1/P005 短按刷新、双击翻页、长按预留配网；SW2/P006 单击翻页。刷新在启动联网中排队，`[hb] rq=1` 表示尚待发送；Wi-Fi 进入 FAIL 后再短按会重启连接阶梯。TS11/TS12 触摸仍待 RASC 加入 CTSU/RM_TOUCH 组件；目前仅 pin mux 已配置，不会触摸产生按键事件。
-- SoftAP 模式切换和网页配置 SSID/密码/城市仍属于 DESIGN.md §7 阶段4；当前阶段不实现网页配网。
+- **按键**：已验证的是 SW1/P005 短按刷新、双击翻页，SW2/P006 单击翻页；刷新在启动联网中排队，`[hb] rq=1` 表示尚待发送；Wi-Fi 进入 FAIL 后再短按会重启连接阶梯。触摸输入和长按配网尚未完成整机验收。
+- **配网状态**：尚未完成 RA 配网主状态机，现有 `src/provisioning_portal.c` 只有页面与 HTTP/TCP 解析原型，未连入天气状态机，也未实现凭据持久化。网页和生命周期参照文件副本在 `doc/reference/gd32_weather_app/`；DA16200 UM-WI-003 Rev 2.12 PDF 和 TCP demo 在 `doc/reference/`。禁止将这些原型描述为完整配网。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。
 
@@ -335,9 +335,9 @@ ATF                    恢复出厂（清 NVRAM）
 | **`AT+DEFAP`** | 默认 AP | **可能是开机自连机制**，待 `AUTOB` 验 |
 | **`AT+GETFASTCONN` / `AT+SETFASTCONN`** | fast connect | **可能是开机自连机制**，待 `AUTOB` 验 |
 | `AT+WFSTAT` / `AT+WFSTA` / `AT+WFRSSI` / `AT+WFLCST` | 状态 / 已连站点 | `WFLCST` 可作 §8.1 的回读校验 |
-| **`AT+PROVSTART` / `AT+PROVSTAT`** | **模块自带配网** | 阶段4 可能不必自建 HTTP 服务 |
-| `AT+TCPDATAMODE` | TCP 数据透传模式 | 阶段4 相关 |
-| `AT+TRTS`/`TRTC`/`TRUR`/`TRPRT`/`TRPALL`/`TRTALL`/`TRSAVE`/`TRSSL*` | TCP / SSL | 风险#8 |
+| `AT+WFMODE` / `AT+WFSAP` | 设置 DA16200 SoftAP mode/profile | 以 UM-WI-003 第49–50页为准；切换模式后的重启/回读须验证 |
+| `AT+TCPDATAMODE` / `AT+TRTS=<port>` | TCP 数据模式 / TCP Server 监听 | UM-WI-003 第112–117页；接入和断开事件及 `+TRDTS` 为长度型 TCP 收包 |
+| `<ESC>S` | TCP client 数据发送 | 实际 ESC 字节 `0x1B` + `S`，后续字段及数据格式依 UM-WI-003 第116–117页 |
 | `AT+NWPING` / `AT+NWHOST` | 出网诊断 | |
 
 连接成功时序（实测）：

@@ -17,13 +17,15 @@
 #include "hal_data.h"
 #include "key_scan.h"
 #include "weather_cfg.h"
+#include "../qe_gen/qe_touch_config.h"
 
 /* ---- 内部状态 ----
  * ⚠ 每个按键一套独立状态（GD32 版只有 1 个键，本工程板上有 2 个机械键，
  *   映射见 DESIGN §6：机械键1 走三态，机械键2 单击翻页）。
  *   绝不能共用状态 —— 共用会导致两键同时按下/先后按下时互相抢占，
  *   出现"按机械键1 却触发翻页"这类串扰。 */
-#define KEY_N  2U   /**< 机械键数量（触摸键阶段3 走 CTSU，不在此列） */
+#define KEY_N  4U   /**< 机械键 2 路 + CTSU 触摸键 2 路 */
+#define TOUCH_SCAN_INTERVAL_MS 20U
 
 typedef struct {
     uint8_t   debounced;        /**< 消抖后电平: 1=按下 */
@@ -45,6 +47,10 @@ static key_msg_t  s_fifo[KEY_EVT_FIFO_DEPTH];
 static uint8_t    s_fifo_head;
 static uint8_t    s_fifo_cnt;
 static uint32_t   s_last_poll_ms;
+static uint32_t   s_touch_scan_ms;
+static uint8_t    s_touch_open;
+static uint8_t    s_touch_scan_pending;
+static uint64_t   s_touch_status;
 
 /**
  * @brief 事件入队（满则丢最旧，保最新）
@@ -85,6 +91,12 @@ static uint8_t key_raw_read (key_id_t id)
     uint8_t active_low;
     bsp_io_port_pin_t pin;
 
+    if ((KEY_ID_TOUCH1 == id) || (KEY_ID_TOUCH2 == id))
+    {
+        uint8_t shift = (uint8_t)((KEY_ID_TOUCH2 == id) ? 1U : 0U);
+        return (uint8_t)((s_touch_status >> shift) & 1ULL);
+    }
+
     if (KEY_ID_MECH1 == id)
     {
         pin         = WEATHER_KEY_PIN;
@@ -115,15 +127,27 @@ void key_init (void)
     s_fifo_head    = 0U;
     s_fifo_cnt     = 0U;
     memset(s_fifo, 0, sizeof(s_fifo));
+    s_touch_scan_ms = 0U;
+    s_touch_scan_pending = 0U;
+    s_touch_status = 0U;
+    s_touch_open = (uint8_t)(FSP_SUCCESS == RM_TOUCH_Open(
+        g_qe_touch_instance_config01.p_ctrl, g_qe_touch_instance_config01.p_cfg));
+    if (0U == s_touch_open)
+    {
+        printf("[key] RM_TOUCH_Open failed; touch keys disabled\r\n");
+    }
+    else
+    {
+        printf("[key] QE touch ready: TS11=touch1 refresh, TS12=touch2 page\r\n");
+    }
 
     /* ⚠ 不要在这里"顺手"打开内部上拉。
      * IOPORT_CFG_PORT_DIRECTION_INPUT 本身不含上拉，但本板 P005/P006
      * **硬件已有外部上拉**（用户已核对原理图确认），且 `[key] level now: k2=0`
      * 说明 P006 空闲确实读到高电平 —— 上拉是好的，不需要软件再补。
      * 内部上拉与外部上拉并联只会额外分流，无益于诊断。 */
-    printf("[key] init 2 mech keys: P005(active_low=%d) P006(active_low=%d); "
-           "touch TS11/TS12 in stage3\r\n",
-           WEATHER_KEY_ACTIVE_LOW, WEATHER_KEY2_ACTIVE_LOW);
+    printf("[key] init 4 keys: P005(active_low=%d) P006(active_low=%d) TS11 TS12\r\n",
+            WEATHER_KEY_ACTIVE_LOW, WEATHER_KEY2_ACTIVE_LOW);
     printf("[key] level now: k1=%u k2=%u (idle should be 0)\r\n",
            (unsigned)key_raw_read(KEY_ID_MECH1),
            (unsigned)key_raw_read(KEY_ID_MECH2));
@@ -138,6 +162,7 @@ void key_poll (uint32_t now_ms)
         return;
     }
     s_last_poll_ms = now_ms;
+    key_touch_poll(now_ms);
 
     for (i = 0U; i < (uint8_t)KEY_N; i++)
     {
@@ -183,9 +208,9 @@ void key_poll (uint32_t now_ms)
         printf("[key] k%u %s: raw=%u (1=high) normalized=%u\r\n",
                (unsigned)i,
                raw ? "PRESSED" : "released",
-               (unsigned)((KEY_ID_MECH1 == (key_id_t)i) ?
-                          ((WEATHER_KEY_ACTIVE_LOW)  ? (uint8_t)!raw : raw) :
-                          ((WEATHER_KEY2_ACTIVE_LOW) ? (uint8_t)!raw : raw)),
+               (unsigned)(((KEY_ID_MECH1 == id) || (KEY_ID_MECH2 == id)) ?
+                          ((KEY_ID_MECH1 == id ? WEATHER_KEY_ACTIVE_LOW : WEATHER_KEY2_ACTIVE_LOW) ?
+                           (uint8_t)!raw : raw) : raw),
                (unsigned)raw);
         if (raw)                            /* 刚按下 */
         {
@@ -207,6 +232,45 @@ void key_poll (uint32_t now_ms)
                     c->release_ms = now_ms;
                 }
             }
+        }
+    }
+}
+
+void key_touch_poll (uint32_t now_ms)
+{
+    fsp_err_t err;
+
+    if (0U == s_touch_open)
+    {
+        return;
+    }
+
+    if (s_touch_scan_pending)
+    {
+        if (0U == g_qe_touch_flag)
+        {
+            return;
+        }
+        g_qe_touch_flag = 0U;
+        s_touch_scan_pending = 0U;
+        err = RM_TOUCH_DataGet(g_qe_touch_instance_config01.p_ctrl, &s_touch_status, NULL, NULL);
+        if (FSP_SUCCESS != err)
+        {
+            printf("[key] touch data get failed: %d\r\n", (int)err);
+        }
+    }
+
+    if ((now_ms - s_touch_scan_ms) >= TOUCH_SCAN_INTERVAL_MS)
+    {
+        s_touch_scan_ms = now_ms;
+        err = RM_TOUCH_ScanStart(g_qe_touch_instance_config01.p_ctrl);
+        if (FSP_SUCCESS == err)
+        {
+            s_touch_scan_pending = 1U;
+        }
+        else if (FSP_ERR_IN_USE != err)
+        {
+            printf("[key] touch scan start failed: %d\r\n", (int)err);
         }
     }
 }

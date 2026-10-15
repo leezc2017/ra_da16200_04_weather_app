@@ -152,6 +152,10 @@
     <node id="board.clock.uclk.display" option="board.clock.uclk.display.value"/>
   </raClockConfiguration>
   <raComponentSelection>
+    <component apiversion="" class="HAL Drivers" condition="" group="all" subgroup="r_ctsu" variant="" vendor="Renesas" version="6.6.0">
+      <description>Capacitive Touch Sensing Unit</description>
+      <originalPack>Renesas.RA.6.6.0.pack</originalPack>
+    </component>
     <component apiversion="" class="Projects" condition="" group="all" subgroup="common" variant="" vendor="Renesas" version="6.6.0">
       <description>Common source for all template projects.</description>
       <originalPack>Renesas.RA_common.6.6.0.pack</originalPack>
@@ -196,6 +200,10 @@
       <description>SCI UART</description>
       <originalPack>Renesas.RA.6.6.0.pack</originalPack>
     </component>
+    <component apiversion="" class="Middleware" condition="" group="all" subgroup="rm_touch" variant="" vendor="Renesas" version="6.6.0">
+      <description>Touch</description>
+      <originalPack>Renesas.RA.6.6.0.pack</originalPack>
+    </component>
   </raComponentSelection>
   <raElcConfiguration/>
   <raIcuConfiguration/>
@@ -208,6 +216,10 @@
       <property id="module.driver.ioport.elc_trigger_ioport3" value="_disabled"/>
       <property id="module.driver.ioport.elc_trigger_ioport4" value="_disabled"/>
       <property id="module.driver.ioport.pincfg" value="g_bsp_pin_cfg"/>
+    </module>
+    <module id="module.driver.touch_on_touch.296308232"/>
+    <module id="module.driver.ctsu_on_ctsu.1424974934">
+      <property id="module.driver.ctsu.cap" value="enum.driver.ctsu.trigger.trigger_software"/>
     </module>
     <module id="module.driver.uart_on_sci_uart.1168072089">
       <property id="module.driver.uart.name" value="g_usb_uart"/>
@@ -271,6 +283,9 @@
       <stack module="module.driver.ioport_on_ioport.0"/>
       <stack module="module.driver.uart_on_sci_uart.1168072089"/>
       <stack module="module.driver.uart_on_sci_uart.942498640"/>
+      <stack module="module.driver.touch_on_touch.296308232">
+        <stack module="module.driver.ctsu_on_ctsu.1424974934" requires="module.driver.touch_on_touch.requires.ctsu"/>
+      </stack>
     </context>
     <config id="config.driver.sci_uart">
       <property id="config.driver.sci_uart.param_checking_enable" value="config.driver.sci_uart.param_checking_enable.bsp"/>
@@ -283,6 +298,18 @@
     <config id="config.driver.ioport">
       <property id="config.driver.ioport.checking" value="config.driver.ioport.checking.system"/>
       <property id="config.driver.ioport.ccd_support_enable" value="config.driver.ioport.ccd_support_enable.disabled"/>
+    </config>
+    <config id="config.driver.touch">
+      <property id="config.driver.touch.param_checking_enable" value="config.driver.touch.param_checking_enable.bsp"/>
+      <property id="config.driver.touch.uart_support" value="config.driver.touch.uart_support.disabled"/>
+      <property id="config.driver.touch.tuning_support" value="config.driver.touch.tuning_support.disabled"/>
+      <property id="config.driver.touch.chattering_suppression_type" value="config.driver.touch.chattering_suppression_type.TypeA"/>
+    </config>
+    <config id="config.driver.ctsu">
+      <property id="config.driver.ctsu.param_checking_enable" value="config.driver.ctsu.param_checking_enable.bsp"/>
+      <property id="config.driver.ctsu.dtc_enable" value="config.driver.ctsu.dtc_enable.disabled"/>
+      <property id="config.driver.ctsu.auto_judge_enable" value="config.driver.ctsu.auto_judge_enable.disabled"/>
+      <property id="module.driver.ctsu.int_priority_level" value="board.icu.common.irq.priority12"/>
     </config>
   </raModuleConfiguration>
   <raPinConfiguration>

@@ -3,6 +3,10 @@
 #define COMMON_DATA_H_
 #include <stdint.h>
 #include "bsp_api.h"
+#include "r_ctsu.h"
+#include "r_ctsu_api.h"
+#include "rm_touch.h"
+#include "rm_touch_api.h"
 #include "r_ioport.h"
 #include "bsp_pin_cfg.h"
 FSP_HEADER

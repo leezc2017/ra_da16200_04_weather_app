@@ -5,6 +5,22 @@ RA4M2 天气显示工程：OLED 显示 + WiFi（DA16200 AT 指令）+ 天气 API
 
 工程文档在 `doc/README.md`（28 KB）和 `DESIGN.md`（35 KB）。
 
+## 本地参考工程与资料（无需重复询问用户）
+
+- **GD32 同款网页配网实现（行为、页面字段、状态迁移的首要参考）**：
+  `..\..\..\GD32\workspace\GD32VW553\4.weather_app`
+  - 网页：`tools/portal.html`
+  - SoftAP / HTTPD / POST 参数解析及连接重试：`src/wifi_softap_provisioning.c`
+  - 凭据持久化、配网状态机：`src/wifi_prov.c`、`src/wifi_prov.h`
+  - 配网 UI：`src/weather_ui.c`
+  - 当前工程已复制需要的网页、SoftAP/凭据源码至 `doc/reference/gd32_weather_app/`，评审时优先查副本，避免路径变化造成差异。
+- **DA16200 AT 命令目录/流程说明**：
+  `DA16200_DA16600_AT命令分类与天气联网流程.md`
+  详细 TCP AT 命令协议见 `1.文档资料\无线模块评测资料包\瑞萨DA16200超低功耗Wifi模块\DA16200MOD模块\wifi模块工具\REN_UM-WI-003_DA16200_DA16600_AT-Command_Rev_2v12_MAS_20220807.pdf`：SoftAP `WFSAP` 第49–50页、TCP Server `TRTS` 与接入/断开 URC 第112–115页、`<ESC>S` 数据发送及 `+TRDTS` 收包第116–117页、TCP Server 测试第146页。优先阅读本机 PDF，不要把分类索引误当成唯一 AT 资料；只对手册和已有 demo/log 都没有覆盖的事项提问。
+- **RA4M2 CTSU/RM_TOUCH FSP 6.6 参考**：`..\RA4M2TOUCH`
+- **本机 FSP/GCC 安装根目录**：`%FSP_ROOT%`
+- DA16200 PDF 和 TCP demo 的工程内副本位于 `doc/reference/da16200_manual/` 与 `doc/reference/da16200_tcp_ra4m2/`。
+
 ## 硬件
 
 | 项 | 值 |
@@ -65,12 +81,12 @@ putchar('P'); at_probe_poll();         /* AUTO / AUTOB 探测 */
 ## 编译
 
 ```powershell
-$mk = "$env:LOCALAPPDATA\Programs\Renesas\RA\e2studio_v2026-07_fsp_v6.6.0\eclipse\plugins\com.renesas.ide.exttools.gnumake.win32.x86_64_4.3.1.v20240909-0854\mk\make.exe"
+$mk = "$env:FSP_ROOT\eclipse\plugins\com.renesas.ide.exttools.gnumake.win32.x86_64_4.3.1.v20240909-0854\mk\make.exe"
 & $mk -j8 all      # 在 Debug\ 目录下执行
 ```
 
 - 复用 CDT 生成的 makefile（`Debug\makefile` + 各 `subdir.mk`），**不需要 EIDE**。
-- 工具链：Arm GNU GCC 13.2.1（`.../e2studio_v2026-07_fsp_v6.6.0/toolchains/gcc_arm/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-arm-none-eabi/bin`）。
+- 工具链：Arm GNU GCC 13.2.1（`%FSP_ROOT%\toolchains\gcc_arm\arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-arm-none-eabi\bin`）。
 - GCC / busybox / make 的路径由 `Debug/makefile.init` 自动注入 PATH，
   调用方只需提供 make.exe 的路径。
 - 关键编译选项：`-mcpu=cortex-m33 -mthumb -mfloat-abi=hard -mfpu=fpv5-sp-d16 -O2 -gdwarf-4 -fno-strict-aliasing`
@@ -117,7 +133,8 @@ $mk = "$env:LOCALAPPDATA\Programs\Renesas\RA\e2studio_v2026-07_fsp_v6.6.0\eclips
 - **阶段2**：机械按键 —— P005 / P006，**已在 FSP 里配置为 GPIO input**。
   之前未配置时 `R_BSP_PinRead` 读到未定义电平，4 键全无反应（2026-10-04 实测）。
 - **阶段3**：CTSU 触摸 —— TSCAP(P207) + TS11(P415) + TS12(P708)。
-  **触摸不是 GPIO，读电平无效**，必须由 `r_ctsu` + `rm_touch` 扫描，目前尚未接入。
+  **触摸不是 GPIO，读电平无效**，必须由 `r_ctsu` + `rm_touch` + QE 阈值配置扫描。
+  本工程已配置 CTSU/RM_TOUCH、QE instance、向量与 CDT build rules，FSP 6.6 `make -B -j8 all` 已验证链接。还需要以硬件调试 QE 参数并验证触摸按键事件；在此之前不得标为板测完成。
 
 新增硬件阶段时，请同步更新 `pin_data.c` 的注释与本文件。
 
