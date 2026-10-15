@@ -49,7 +49,7 @@ static struct {
     bool        term_seen;
     at_result_t term_res;
 
-    char        line[AT_LINE_MAX];          /* 行检测缓冲 */
+    char        line[AT_LINE_MAX];          /* 行检测缓冲（含 +TRDTS 请求 URC） */
     uint16_t    line_len;
     bool        line_overflow;
 
@@ -81,6 +81,8 @@ static struct {
      * 保证 45s 被动监听期内 URC 超过 FIFO 深度也不漏判(风险#4)。 */
     char        seen_buf[AT_SEEN_MAX][AT_URC_LINE];
     uint8_t     seen_cnt;
+    at_engine_urc_callback_t urc_cb;
+    void       * urc_context;
 } s;
 
 #define TX_SUBMIT_TIMEOUT_MS  1000U         /* 提交/发送超过 1s 判失败 */
@@ -263,6 +265,12 @@ bool at_engine_urc_get(const char * prefix, char * out, uint16_t out_size)
     return false;
 }
 
+void at_engine_urc_callback_set(at_engine_urc_callback_t callback, void *context)
+{
+    s.urc_cb = callback;
+    s.urc_context = context;
+}
+
 void at_engine_urc_seen_clear(void)
 {
     s.seen_cnt = 0;
@@ -426,6 +434,16 @@ static void line_done(void)
         }
 
         urc_push(s.line);
+    }
+    else if (0 == strncmp(s.line, "+TRDTS:", 7U))
+    {
+        /* TCP request payloads are passed in-band to the owner instead of the
+         * short AT command response buffer. Length-delimited data may be split
+         * into multiple +TRDTS URCs, so don't overwrite one with the next. */
+        if (NULL != s.urc_cb)
+        {
+            s.urc_cb(s.line, s.line_len, s.urc_context);
+        }
     }
     else if ('+' == s.line[0])
     {

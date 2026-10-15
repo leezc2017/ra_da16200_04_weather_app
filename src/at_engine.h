@@ -15,7 +15,7 @@
 
 #define AT_RESP_BUF_SIZE   4096U          /* 响应/payload 采集缓冲 */
 #define AT_CMD_MAX         180U           /* 单条命令上限(含自动补的 CRLF) */
-#define AT_LINE_MAX        256U           /* 行检测缓冲(超长行截断, 不参与检测) */
+#define AT_LINE_MAX        2048U          /* +TRDTS hex 模式可含 HTTP 请求行/头/表单 */
 #define AT_URC_FIFO        4U             /* URC 消费队列深度 */
 #define AT_URC_LINE        96U
 #define AT_SEEN_MAX        8U             /* sticky "曾出现过" 记录条数 */
@@ -65,6 +65,8 @@ typedef struct {
     uint32_t plus_lines;                  /* 其中以 '+' 开头的行数(URC/终止行) */
 } at_engine_diag_t;
 
+typedef void (*at_engine_urc_callback_t)(const char *line, uint16_t length, void *context);
+
 void             at_engine_init(void);
 void             at_engine_tick(uint32_t elapsed_ms);   /* 每主循环 tick 调用 */
 uint32_t         at_engine_now_ms(void);
@@ -110,5 +112,7 @@ void             at_engine_urc_trace(bool on);          /* 每条 URC 打时间�
  * @return true=找到并拷贝成功；false=未找到或缓冲太小
  */
 bool             at_engine_urc_get(const char * prefix, char * out, uint16_t out_size);
+/** Register callback for long binary/text URCs such as +TRDTS. */
+void             at_engine_urc_callback_set(at_engine_urc_callback_t callback, void *context);
 
 #endif /* AT_ENGINE_H */

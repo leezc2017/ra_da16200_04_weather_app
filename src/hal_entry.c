@@ -47,7 +47,7 @@
 #endif
 #define USB_TX_RING_SIZE  (4096U)     /* USB TX 环形缓冲: printf 入队, 主循环泵发, 不阻塞 */
 #define RX_RING_SIZE      (8192U)     /* WIFI RX 环形缓冲: 容 2KB+ 突发(WFSCAN 实测 ~1.9KB) */
-#define RX_LINE_MAX       (256U)      /* 单行最大长度 */
+#define RX_LINE_MAX       (2048U)     /* TCP receive URC is hex encoded in safe mode */
 #define WIFI_TX_WAIT_MS   (200U)      /* 透传发送等待 TX 完成的兜底超时 */
 #define RX_PROCESS_BUDGET (256U)      /* 每轮最多处理字节数，防止 ISR 持续入流饿死主循环 */
 
@@ -367,6 +367,39 @@ static volatile uint16_t wifi_rx_rd_index = 0;
 
 static char wifi_rx_line[RX_LINE_MAX];
 static uint16_t wifi_rx_line_len = 0;
+/* Dedicated DMA-safe staging buffer for future ESC-S TCP frames. It is
+ * deliberately separate from the 100-byte console/AT bridge buffer. */
+static uint8_t wifi_binary_tx[1400U];
+static volatile uint8_t wifi_binary_tx_busy;
+static volatile uint32_t wifi_binary_tx_done;
+
+bool wifi_uart_write_async(const uint8_t *data, uint16_t length)
+{
+    fsp_err_t write_err;
+    if ((NULL == data) || (0U == length) || (wifi_binary_tx_busy != 0U) || (length > sizeof(wifi_binary_tx)))
+    {
+        return false;
+    }
+    memcpy(wifi_binary_tx, data, length);
+    wifi_binary_tx_busy = 1U;
+    write_err = R_SCI_UART_Write(&g_wifi_uart_ctrl, wifi_binary_tx, length);
+    if (FSP_SUCCESS != write_err)
+    {
+        wifi_binary_tx_busy = 0U;
+        return false;
+    }
+    return true;
+}
+
+bool wifi_uart_write_busy(void)
+{
+    return (wifi_binary_tx_busy != 0U);
+}
+
+uint32_t wifi_uart_write_done_count(void)
+{
+    return wifi_binary_tx_done;
+}
 
 
 /* DA16200 WIFI 口回调: TX 完成计数 + 收到字符入环形缓冲
@@ -382,6 +415,11 @@ void wifi_uart_cb (uart_callback_args_t * p_args)
         case UART_EVENT_TX_COMPLETE:
         {
             wifi_tx_done_cnt++;
+            if (wifi_binary_tx_busy != 0U)
+            {
+                wifi_binary_tx_busy = 0U;
+                wifi_binary_tx_done++;
+            }
             break;
         }
         case UART_EVENT_RX_CHAR:
@@ -686,7 +724,7 @@ static void wifi_rx_line_flush (void)
     if (wifi_rx_line_len > 0U)
     {
         wifi_rx_line[wifi_rx_line_len] = '\0';
-        if (!at_engine_payload_active())
+        if (!at_engine_payload_active() && (0 != strncmp(wifi_rx_line, "+TRDTS:", 7U)))
         {
             printf("[WIFI] %s\r\n", wifi_rx_line);
         }

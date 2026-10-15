@@ -11,7 +11,7 @@
 - **RA 主栈**：`configuration.xml` 中 `config.bsp.common.main=0x1000`（4 KB）。2026-10-14 曾观察到 1 KB 栈版本在天气 UI 路径发生 INVSTATE HardFault，PC 落入主栈区；4 KB 版本已实测跑通 SNTP、now/daily HTTP 200、解析并持续心跳。栈配置应通过 RASC 生成，不要只改 `bsp_cfg.h`。
 - **状态诊断**：`[hb] eng=0` 表示 AT 引擎闲置，此时 `mode=0`；`loop/stage/wrx/urx/wtx` 分别是主循环次数、最近主循环阶段、已处理 Wi‑Fi/USB RX 字节和 Wi‑Fi TX 完成次数。若发生 Cortex-M Fault，现场保存在 `.ram_noinit`，硬件 RESET 后可打印 `[FAULT]`；彻底断电不保证保留。
 - **按键**：已验证的是 SW1/P005 短按刷新、双击翻页，SW2/P006 单击翻页；刷新在启动联网中排队，`[hb] rq=1` 表示尚待发送；Wi-Fi 进入 FAIL 后再短按会重启连接阶梯。触摸输入和长按配网尚未完成整机验收。
-- **配网状态**：尚未完成 RA 配网主状态机，现有 `src/provisioning_portal.c` 只有页面与 HTTP/TCP 解析原型，未连入天气状态机，也未实现凭据持久化。网页和生命周期参照文件副本在 `doc/reference/gd32_weather_app/`；DA16200 UM-WI-003 Rev 2.12 PDF 和 TCP demo 在 `doc/reference/`。禁止将这些原型描述为完整配网。
+- **配网状态**：尚未完成 RA 配网主状态机，现有 `src/provisioning_portal.c` 只有页面与 HTTP/TCP 解析原型，未连入天气状态机，也未实现凭据持久化。AT 引擎已提供长 `+TRDTS` URC 回调和 UART 异步原始发送基础接口，但当前尚未与 portal 串起来。网页和生命周期参照文件副本在 `doc/reference/gd32_weather_app/`；DA16200 UM-WI-003 Rev 2.12 PDF 和 TCP demo 在 `doc/reference/`。禁止将这些原型描述为完整配网。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。
 
