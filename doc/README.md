@@ -4,14 +4,17 @@
 
 本工程是 **RA4M2 + DA16200 天气显示站**（复刻 GD32VW553 版 `4.weather_app`），总体方案见根目录 `DESIGN.md`。
 
-- **当前状态（阶段2，串口 OLED 模拟）**：已实测 Wi-Fi、SNTP/AT+TIME、now/daily HTTP 200、JSON 解析和持续心跳；天气状态机使用固定 Wi-Fi 凭据，心知天气按 `location=ip` 获取。主页与 Wi-Fi 信息页通过 USB 串口输出 128×32 OLED 四行内容。真实 OLED 未连接时跳过 OLED 初始化。
+- **当前状态（天气链路/串口 OLED 模拟）**：已实测 Wi-Fi、SNTP/AT+TIME、now/daily HTTP 200、JSON 解析和持续心跳；联网凭据和城市优先从 RA Data Flash 双槽记录加载，无有效记录时回退编译默认值。主页与 Wi-Fi 信息页通过 USB 串口输出 128×32 OLED 四行内容。真实 OLED 未连接时跳过 OLED 初始化。
 - **NTP 配置**：主服务器为 `ntp.aliyun.com`，备用 `pool.ntp.org`。模块返回 NWSNTP `OK` 后等待 8 秒，再查询 `AT+TIME` 验证；时间查询完成后开始天气 HTTP 请求。
 - **天气指标与按键**：now JSON 的可选 humidity/wind_speed 若缺失，会尝试使用 daily JSON 同名字段补齐；仍为 `--` 表示两次响应都没提供值。P005 短按在未联网/AT 忙时排队，联网后执行；P005 双击和 P006 单击翻页。CTSU TS11/TS12 的 FSP 6.6 QE Touch 文件和构建规则已接入，`make -B -j8 all` 可完整链接；触摸阈值及触摸事件仍未完成板上验收。
 - **板载 LED**：LED1/P045 联网中约 200 ms 节拍闪烁、连接成功常亮；LED2/P044 天气请求中闪烁、天气有效后常亮；LED3/P002 在联网/天气请求活动期间熄灭，空闲时慢速呼吸（约 2 秒周期）。GPIO 高电平点亮，固件运行时配置。
 - **RA 主栈**：`configuration.xml` 中 `config.bsp.common.main=0x1000`（4 KB）。2026-10-14 曾观察到 1 KB 栈版本在天气 UI 路径发生 INVSTATE HardFault，PC 落入主栈区；4 KB 版本已实测跑通 SNTP、now/daily HTTP 200、解析并持续心跳。栈配置应通过 RASC 生成，不要只改 `bsp_cfg.h`。
 - **状态诊断**：`[hb] eng=0` 表示 AT 引擎闲置，此时 `mode=0`；`loop/stage/wrx/urx/wtx` 分别是主循环次数、最近主循环阶段、已处理 Wi‑Fi/USB RX 字节和 Wi‑Fi TX 完成次数。若发生 Cortex-M Fault，现场保存在 `.ram_noinit`，硬件 RESET 后可打印 `[FAULT]`；彻底断电不保证保留。
 - **按键**：已验证的是 SW1/P005 短按刷新、双击翻页，SW2/P006 单击翻页；刷新在启动联网中排队，`[hb] rq=1` 表示尚待发送；Wi-Fi 进入 FAIL 后再短按会重启连接阶梯。触摸输入和长按配网尚未完成整机验收。
-- **配网状态**：尚未完成 RA 配网主状态机，现有 `src/provisioning_portal.c` 只有页面与 HTTP/TCP 解析原型，未连入天气状态机，也未实现凭据持久化。AT 引擎已提供长 `+TRDTS` URC 回调和 UART 异步原始发送基础接口，但当前尚未与 portal 串起来。网页和生命周期参照文件副本在 `doc/reference/gd32_weather_app/`；DA16200 UM-WI-003 Rev 2.12 PDF 和 TCP demo 在 `doc/reference/`。禁止将这些原型描述为完整配网。
+- **启动模式与配网**：开机先下发 `AT+WFTAP`、`AT+WFMODE=0`、`AT+RESTART`，只有收到 `+INIT:DONE,0` 才启动 STA 联网阶梯；仍报告 AP 模式或启动超时会有限重试，不会在未确认 STA 时循环尝试联网。配网请求时按需切换 SoftAP。SoftAP + `TRTS=8080` 与 RA-hosted HTTP GET/POST、STA 回连已有实机日志；无需修改模组 SDK 固件。**端口区别：80 显示 DA16200 LWIP 页面；RA 配网页在 8080，手动访问 `http://192.168.1.100:8080/`。**
+- **RA Data Flash 设置**：SSID、密码、城市保存在 8 KB Data Flash 的最后 384 字节（`0x08001E80–0x08001FFF`），双槽、CRC 和序号校验；启动只读，首次无记录用编译默认值而不擦写。配网获得 STA 连接后写入另一槽并读回校验。页面提交先显示“已收到/正在连接”，不是最终 Flash 保存成功回执。**编译已通过；Flash 实际写入、断电保留、双槽掉电恢复尚待板上验证。** 离线 `PORTALTEST` 可测 parser/framing，阶段4尚未全部验收。
+- **OLED 配网提示**：启动 SoftAP 时显示启动提示；AP/TCP listener ready 后显示热点名、密码和 `192.168.1.100:8080` 访问提示；POST 后切回 STA 时显示连接中的 SSID。Wi-Fi 状态页和连接/失败页显示当前生效 SSID。
+- **最近实机状态**：用户使用 Renesas Flash Programmer 烧写启动模式收敛版本后反馈“当前版本正常”；串口日志 `44.txt` 是该修复前的失败版本，显示开机直接进入 `WFSTA/WFCAP/WFJAPA` 且模块返回 `ERROR:-5`。新版本最新启动顺序仍建议留存串口日志，完整 Data Flash 掉电验收未完成。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。
 
@@ -332,13 +335,33 @@ ATF                    恢复出厂（清 NVRAM）
 | `AT+WFJAPA=<ssid>,<pwd>[,<hidden>]` | 连接并存 NVRAM | 连接成功回 `+WFJAP:1,'<ssid>','<ip>'` |
 | `AT+WFCAP` | 用 NVRAM profile 连接 | 无 profile 时 `ERROR:-7` |
 | `AT+WFQAP` | 断开 | |
+| `AT+NWHTS=1` | DA16200 AT HTTP Server | AT server 按 UM-WI-003 Rev 2.12 p.96–97 要求已连接 AP；本工程不用该命令。实测 SoftAP TCP/80 显示 DA16200 LWIP 页面，RA 门户通过 TCP `TRTS=8080` 提供；访问 `http://192.168.1.100:8080/`，无需改 SDK 固件 |
 | **`AT+DEFAP`** | 默认 AP | **可能是开机自连机制**，待 `AUTOB` 验 |
 | **`AT+GETFASTCONN` / `AT+SETFASTCONN`** | fast connect | **可能是开机自连机制**，待 `AUTOB` 验 |
 | `AT+WFSTAT` / `AT+WFSTA` / `AT+WFRSSI` / `AT+WFLCST` | 状态 / 已连站点 | `WFLCST` 可作 §8.1 的回读校验 |
-| `AT+WFMODE` / `AT+WFSAP` | 设置 DA16200 SoftAP mode/profile | 以 UM-WI-003 第49–50页为准；切换模式后的重启/回读须验证 |
-| `AT+TCPDATAMODE` / `AT+TRTS=<port>` | TCP 数据模式 / TCP Server 监听 | UM-WI-003 第112–117页；接入和断开事件及 `+TRDTS` 为长度型 TCP 收包 |
+| `AT+WFMODE` / `AT+WFSAP` | 设置 DA16200 SoftAP mode/profile | UM-WI-003 第49–50页；`WFSAP` 在 STA 模式配置后需重启才启动 SoftAP |
+| `AT+TCPDATAMODE` / `AT+TRTS=<port>` | TCP 数据模式 / TCP Server 监听 | SoftAP + TCP Server 已实测通过，无需改 SDK 固件。SoftAP 下 `TRTS=8080` 返回 OK，手机已成功接入；该用法见 R01AN7287EJ0100 §2.1。UM-WI-003 p.112 有 connected-to-AP prerequisite 表述。服务器事件 `+TRCTS`/`+TRXTS` (p.114–115)，收包/回包 `+TRDTS`/`<ESC>S` (p.116–117)。|
+| 配网网页 HTTP 承载 | 已实测：AT SoftAP TCP Server + RA HTTP | `doc` 保存的 `33 - 副本.txt` 实机日志确认 RA 收到浏览器 `GET /`、`GET /favicon.ico` 和 `POST /cfg`，提交后 `+WFJAP:1` 成功回 STA。**端口 80 是 DA16200 LWIP 页面；本项目 RA 配网页面用 8080**，手机需手动打开 `http://192.168.1.100:8080/`，不要用 80 或 captive 自动弹页。 |
 | `<ESC>S` | TCP client 数据发送 | 实际 ESC 字节 `0x1B` + `S`，后续字段及数据格式依 UM-WI-003 第116–117页 |
 | `AT+NWPING` / `AT+NWHOST` | 出网诊断 | |
+
+#### 5.1.1 SoftAP 网页配网实测结果与验收步骤
+
+实测依据：用户提供的桌面日志 `33 - 副本.txt`（build `Oct 16 2026 13:14:21`）。日志确认手机 TCP 接入（`+TRCTS`）、GET `/`、GET `/favicon.ico`、POST `/cfg` 均到达 RA，HTTP POST 回复完成后执行 TCP close / SoftAP teardown / STA restart，最终收到 `+WFJAP:1,'<REDACTED_WIFI_SSID>',<host-ip>`。该日志由用户保存在桌面，没有复制进仓库。
+
+已通过的功能链路无需再从头排查；后续按需复测：
+
+1. 在 RA 控制台输入 `PORTALTEST`，应看到 `[PORTALTEST] PASS`。该命令只验证本地 HTTP 表单、Content-Length 和 TCP hex framing，不替代实机测试。
+2. 长按 P005 进入配网；手机连接 `leeWethWifi` / `12345678` 后，必须手动输入 **`http://192.168.1.100:8080/`**。端口区别已经实机确认：`http://192.168.1.100/`（TCP/80）显示 DA16200 的 LWIP 页面；`http://192.168.1.100:8080/`（TCP/8080）才是 RA 提供的配置页。手机 captive popup 可能探测 80 端口，不要用它判断 RA 页面。
+3. 如需复核链路，观察 `+TRCTS`、GET 对应的 `+TRDTS`，以及提交 `/cfg` 后的 STA 回连结果；出现 `+WFJAP:1` 表示 Wi-Fi 已连上。
+
+仍需完成的边界验收：错误密码、空字段、带空格/百分号编码的城市及编码的 `&`/`=` 密码；检查失败时不误报连接成功、状态机可重新进入。含逗号/单引号的 SSID/密码当前会拒绝（AT 参数为逗号分隔）。Data Flash 双槽代码已实现并编译，但实际写入、重启读回和断电保留尚未完成板测，因此阶段4尚未全部验收。不要手工执行 `ATF` / `AT+PROVSTART`，两者会清除 NVRAM 配置。
+
+#### SSID / 密码 / 城市的 RA Data Flash 持久化
+
+用户要求 Wi-Fi SSID、密码、城市**全部以 RA4M2 Data Flash 作为设置来源**；DA16200 NVRAM profile 只保留为模组连接机制，不作为 RA 设置的唯一副本。`configuration.xml` 已配置 `r_flash_hp` / `g_flash0`（Data Flash programming enabled，BGO disabled）；当前生成的 `ra_gen/hal_data.*` 和 FSP driver 已纳入工程并完成编译链接。RASC 重新生成时需检查 QE Touch/CTSU 配置，避免覆盖当前已验证触摸配置。
+
+实现保留 Data Flash 末尾 `0x08001E80–0x08001FFF`（384 字节），分两个 192-byte slot；记录含 magic/version/sequence/SSID/password/city/CRC/commit。启动只读、无有效记录时使用编译默认设置但不擦写；配置提交时写非当前槽并读回校验，保留上一有效槽。仍需先确认该地址区无其他用途，再实机验证首次空白、写入/读回、二次更新和断电恢复；保存成功页面最终回执及串口密码脱敏也待完善。
 
 连接成功时序（实测）：
 ```

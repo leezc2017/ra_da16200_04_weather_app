@@ -103,7 +103,11 @@ static const char * res_name (at_result_t r)
 
 void at_engine_init(void)
 {
+    at_engine_urc_callback_t urc_callback = s.urc_cb;
+    void * urc_context = s.urc_context;
     memset(&s, 0, sizeof(s));
+    s.urc_cb = urc_callback;
+    s.urc_context = urc_context;
     s.final = AT_RES_PENDING;
     s.mode = AT_MODE_CMD;
     s.resp.err_code = -1;
@@ -405,6 +409,12 @@ static void line_done(void)
             s.term_seen = true;
             s.term_res  = AT_RES_OK;
         }
+    }
+    else if ((ST_IDLE != s.state) && (0 == strcmp(s.line, "DONE")))
+    {
+        /* AT+RESTART reports DONE before reboot; use it as its command ACK. */
+        s.term_seen = true;
+        s.term_res = AT_RES_OK;
     }
     else if (0 == strncmp(s.line, "ERROR", 5))
     {

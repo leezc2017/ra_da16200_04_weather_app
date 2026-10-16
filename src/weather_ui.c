@@ -57,20 +57,36 @@ void ui_main_page(const ui_main_view_t *v, wifi_status_t st)
 
     switch (st) {
     case WIFI_STAT_PROVISIONING:
-        snprintf(rows[0], sizeof(rows[0]), "WiFi provisioning");
-        snprintf(rows[1], sizeof(rows[1]), "AP configuration");
-        snprintf(rows[2], sizeof(rows[2]), "Waiting for setup");
+        if (v->provisioning == 1U) {
+            snprintf(rows[0], sizeof(rows[0]), "WiFi Configure");
+            snprintf(rows[1], sizeof(rows[1]), "AP:leeWethWifi");
+            snprintf(rows[2], sizeof(rows[2]), "PW:12345678");
+            snprintf(rows[3], sizeof(rows[3]), "192.168.1.100:8080");
+        } else if (v->provisioning == 2U) {
+            snprintf(rows[0], sizeof(rows[0]), "Connecting STA");
+            snprintf(rows[1], sizeof(rows[1]), "SSID:%.15s",
+                     v->ssid[0] ? v->ssid : WEATHER_DEFAULT_SSID);
+            snprintf(rows[2], sizeof(rows[2]), "Please wait...");
+        } else if (v->provisioning == 3U) {
+            snprintf(rows[0], sizeof(rows[0]), "Starting STA mode");
+            snprintf(rows[1], sizeof(rows[1]), "Please wait...");
+        } else {
+            snprintf(rows[0], sizeof(rows[0]), "Starting SoftAP");
+            snprintf(rows[1], sizeof(rows[1]), "Please wait...");
+        }
         break;
 
     case WIFI_STAT_CONNECTING:
         snprintf(rows[0], sizeof(rows[0]), "WiFi connecting");
-        snprintf(rows[1], sizeof(rows[1]), "SSID:%.15s", WEATHER_DEFAULT_SSID);
+        snprintf(rows[1], sizeof(rows[1]), "SSID:%.15s",
+                 v->ssid[0] ? v->ssid : WEATHER_DEFAULT_SSID);
         snprintf(rows[2], sizeof(rows[2]), "Please wait...");
         break;
 
     case WIFI_STAT_FAIL:
         snprintf(rows[0], sizeof(rows[0]), "WiFi offline");
-        snprintf(rows[1], sizeof(rows[1]), "SSID:%.15s", WEATHER_DEFAULT_SSID);
+        snprintf(rows[1], sizeof(rows[1]), "SSID:%.15s",
+                 v->ssid[0] ? v->ssid : WEATHER_DEFAULT_SSID);
         snprintf(rows[2], sizeof(rows[2]), "Check connection");
         break;
 

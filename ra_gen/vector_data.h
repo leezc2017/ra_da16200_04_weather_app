@@ -34,14 +34,14 @@ void ctsu_end_isr(void);
 #define SCI0_TEI_IRQn          ((IRQn_Type) 6) /* SCI0 TEI (Transmit end) */
 #define VECTOR_NUMBER_SCI0_ERI ((IRQn_Type) 7) /* SCI0 ERI (Receive error) */
 #define SCI0_ERI_IRQn          ((IRQn_Type) 7) /* SCI0 ERI (Receive error) */
+#define VECTOR_NUMBER_CTSU_WRITE ((IRQn_Type) 8) /* CTSU WRITE (Write request interrupt) */
+#define CTSU_WRITE_IRQn          ((IRQn_Type) 8) /* CTSU WRITE (Write request interrupt) */
+#define VECTOR_NUMBER_CTSU_READ ((IRQn_Type) 9) /* CTSU READ (Measurement data transfer request interrupt) */
+#define CTSU_READ_IRQn          ((IRQn_Type) 9) /* CTSU READ (Measurement data transfer request interrupt) */
+#define VECTOR_NUMBER_CTSU_END ((IRQn_Type) 10) /* CTSU END (Measurement end interrupt) */
+#define CTSU_END_IRQn          ((IRQn_Type) 10) /* CTSU END (Measurement end interrupt) */
 /* The number of entries required for the ICU vector table. */
 #define BSP_ICU_VECTOR_NUM_ENTRIES (11)
-#define VECTOR_NUMBER_CTSU_WRITE ((IRQn_Type) 8)
-#define CTSU_WRITE_IRQn          ((IRQn_Type) 8)
-#define VECTOR_NUMBER_CTSU_READ ((IRQn_Type) 9)
-#define CTSU_READ_IRQn          ((IRQn_Type) 9)
-#define VECTOR_NUMBER_CTSU_END ((IRQn_Type) 10)
-#define CTSU_END_IRQn           ((IRQn_Type) 10)
 
 #ifdef __cplusplus
         }

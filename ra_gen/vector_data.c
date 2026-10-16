@@ -12,9 +12,9 @@
             [5] = sci_uart_txi_isr, /* SCI0 TXI (Transmit data empty) */
             [6] = sci_uart_tei_isr, /* SCI0 TEI (Transmit end) */
             [7] = sci_uart_eri_isr, /* SCI0 ERI (Receive error) */
-            [8] = ctsu_write_isr,
-            [9] = ctsu_read_isr,
-            [10] = ctsu_end_isr,
+            [8] = ctsu_write_isr, /* CTSU WRITE (Write request interrupt) */
+            [9] = ctsu_read_isr, /* CTSU READ (Measurement data transfer request interrupt) */
+            [10] = ctsu_end_isr, /* CTSU END (Measurement end interrupt) */
         };
         #if BSP_FEATURE_ICU_HAS_IELSR
         const bsp_interrupt_event_t g_interrupt_event_link_select[BSP_ICU_VECTOR_NUM_ENTRIES] =
@@ -27,9 +27,9 @@
             [5] = BSP_PRV_VECT_ENUM(EVENT_SCI0_TXI,GROUP5), /* SCI0 TXI (Transmit data empty) */
             [6] = BSP_PRV_VECT_ENUM(EVENT_SCI0_TEI,GROUP6), /* SCI0 TEI (Transmit end) */
             [7] = BSP_PRV_VECT_ENUM(EVENT_SCI0_ERI,GROUP7), /* SCI0 ERI (Receive error) */
-            [8] = BSP_PRV_VECT_ENUM(EVENT_CTSU_WRITE,GROUP0),
-            [9] = BSP_PRV_VECT_ENUM(EVENT_CTSU_READ,GROUP1),
-            [10] = BSP_PRV_VECT_ENUM(EVENT_CTSU_END,GROUP2),
+            [8] = BSP_PRV_VECT_ENUM(EVENT_CTSU_WRITE,GROUP0), /* CTSU WRITE (Write request interrupt) */
+            [9] = BSP_PRV_VECT_ENUM(EVENT_CTSU_READ,GROUP1), /* CTSU READ (Measurement data transfer request interrupt) */
+            [10] = BSP_PRV_VECT_ENUM(EVENT_CTSU_END,GROUP2), /* CTSU END (Measurement end interrupt) */
         };
         #endif
         #endif

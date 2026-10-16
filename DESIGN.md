@@ -22,7 +22,7 @@
 | SNTP | lwip `sntp_start_once()` + 时间钩子 | `AT+NWSNTP=1,ntp.aliyun.com,86400`；等待 8 秒后用 `AT+TIME` 验证 |
 | 解析 | SDK cJSON | **移植单文件 cJSON**（MIT） |
 | OS | FreeRTOS 多任务 | **裸机 while(1) 状态机**（沿用桥工程 10ms 节拍，不开 RTOS） |
-| 凭据存储 | MCU Flash `wifi_credential_t` | WiFi 凭据存 **DA16200 NVRAM**（`AT+WFJAPA` 自动保存）；城市见 §8 |
+| 凭据存储 | MCU Flash `wifi_credential_t` | Wi-Fi SSID/密码/城市从 **RA4M2 Data Flash 双槽记录**加载；DA16200 NVRAM profile 仅作为模组连接机制 |
 | 显示/按键 | 软 SPI OLED + GPIO 按键 | 相同方案，**接线已确认**（OLED=`RA4M2OLED` 示例；按键 2 机械 P005/P006 + 2 触摸 CTSU） |
 
 **核心结论：本工程的主要新增工作是把"透传桥"升级为"程序化 AT 命令引擎"**，其余模块（JSON 解析、天气文案、UI、按键）从 GD32 版直接移植。
@@ -313,34 +313,39 @@ OLED_Set_Pos(x, y):  0xb0 + y     // y 是【页号 0~3】，不是像素纵坐�
 - 2 机械键按 §6 映射接入；2 触摸键拷贝 `RA4M2TOUCH` 的 CTSU 配置（先评估合并方式，见 §6 注意事项）
 - **验收**：行为与 GD32 版 README 的 UI 布局一致，4 键映射表全部生效
 
-### 阶段4：SoftAP 网页配网（必须）+ 城市持久化
-- 按 §8 方案实现：DA16200 SoftAP + DHCP + TCP Server → RA 极简 HTTP 配网页 → 手机提交凭据 → 切 STA 联网存 NVRAM
-- 城市字段随配网页一起提交，存 DA16200 NVRAM（或 RA data flash，阶段4定）
-- **§8.1 的 GD32 根因对策全部落实并验收**
-- **验收**：①全新模块（无凭据）开机长按进配网 → 手机连 AP 打开配网页 → 提交 WiFi/城市 → 自动回连并拉到天气；断电重启免配置；②§8.1 四条健壮性验收全过
+### 阶段4：SoftAP 网页配网与 RA Data Flash 设置持久化（核心链路有实机日志，完整验收待完成）
+- **启动模式收敛**：最新代码在 AT 自检后先执行 `AT+WFTAP` → `AT+WFMODE=0` → `AT+RESTART`，并等待 `+INIT:DONE,0` 才进入联网阶梯；若仍处于 AP 模式会有限重试。配网入口仍按请求切换到 SoftAP。用户最新 RFP 烧写后确认启动模式行为正常。
+- **RA 设置存储实现**：使用 RA4M2 Data Flash 最后 384 字节 `0x08001E80–0x08001FFF`，分为两个 192 字节记录槽，含 magic/version/sequence/SSID/password/city/CRC/commit；启动只读，首次空白不自动擦写；新记录写入非当前槽并读回验证，保留上一有效槽。Data Flash 8 KB、64 字节擦除块、4 字节编程粒度。该地址区尚需确认未被其他固件功能占用，并待实机写入/断电恢复验证。
+- **核心网页配网链路已实机验证成功，无需修改 DA16200 SDK 固件。** DA16200 AT firmware 启动 SoftAP/DHCP/TCP server；RA4M2 接收 `+TRDTS`、解析 GET/POST 并用 raw `<ESC>S` 返回网页；POST 后关闭 TCP session、停 SoftAP、切 STA，`+WFJAP:1` 已在 `doc` 留存的最新板测日志中出现。
+- **端口实测结论：端口 80 显示 DA16200 自带 LWIP 页面；端口 8080 是本项目 RA-hosted 配网页。** 用户提供的 `33 - 副本.txt` 在 `AT+TRTS=8080` 后记录手机 peer `192.168.1.2` 的 `+TRCTS`、GET `/`、GET `/favicon.ico` 和 POST `/cfg`，之后 `WFJAPA` 返回 `+WFJAP:1`。手机需明确打开 `http://192.168.1.100:8080/`；不要使用 80 端口或依赖自动 captive popup。
+- `TRTS` 只提供 TCP socket，不提供 HTTP parser、HTTP 页面或 URI handler；这部分由 RA 实现。UM-WI-003 p.112 的 connected-to-AP prerequisite 与 R01AN7287 SoftAP TCP Server 序列表面存在张力；针对本目标模组/固件，现有板测证据显示 SoftAP 下 `TRTS=8080` 可用，后续以此实际固件日志为准。
+- STA 切回和凭据连接已有表单提交实机日志；RA Data Flash 双槽代码已实现且编译通过，但**Flash 写入、重启读回和断电保留尚未实机验证**，不可将阶段4全部验收完成。
+- 公开 SDK 镜像的 `httpd_init()` / `httpd_post_*` 路径仅作为不改 AT 固件方案的备选，不是当前首选；本任务无需获取或烧写定制 SDK firmware。
+- 工程内 `da16200_tcp_ra4m2/src/dialog_wifi_demo.c` 不是本地 HTTP server：其中 HTML 是注释，实际 demo 在联网后向外部 `api.heclouds.com:80` 发 POST。
+- 页面提交后先返回 HTTP 202（已收到，正在连接）；模组按模式切换及重启流程返回 STA，连接成功后才写入并校验 RA Data Flash 记录。当前没有同一 TCP 会话上的最终持久化成功页面回执。
+- §8.1 的 GD32 根因对策已落实到状态机；完整硬件健壮性回归仍待进行。
+- **剩余验收**：Flash 首次空白、写入/读回、二次更新、断电恢复；错误凭据/重复进退配网健壮性回归；最新启动 STA 收敛代码尚待板测；网页被端口80的 LWIP 页面响应不算 RA 页面验收。端口8080 GET/POST 和此前 STA 回连已有实机日志。
 
-## 8. SoftAP 配网方案（已确认必须做）
+## 8. SoftAP 配网方案（AT 固件 TCP Server 路径；网页闭环已板测）
 
-参考 Renesas 官方 **Ready2Go AT Commands webinar**（SoftAP + Web 页面 demo）与 **RL78/G22 + DA16200 应用笔记 r01an7287ej0100**（AT 命令序列模板），全链路只用通用 AT 命令：
+采用已有 DA16200 AT 固件的 `TRTS` TCP Server（不是 `NWHTS`，也不需要 SDK 改固件）；HTTP 由 RA 实现。目标模组的 SoftAP TCP/RA HTTP 闭环已实机通过。端口 80 为 DA16200 LWIP 页面，配网页固定端口 8080，须手动访问 `http://192.168.1.100:8080/`。
 
 ```
-长按进配网（RA状态机 → PROVISIONING）
-  ① AT+WFMODE=1              切 SoftAP 模式
-  ② AT+WFSAP=WeatherCfg,3,1,<pwd>,1   WPA2 配网SSID+密码
-  ③ AT+RESTART → 等 +INIT:DONE
-  ④ AT+NWIP=1,10.0.0.1,255.255.255.0,10.0.0.1     AP 侧 IP
-  ⑤ AT+NWDHS=1,10.0.0.2,10.0.0.11,1800           DHCP 服务
-  ⑥ AT+TRTS=80 → 开 TCP Server（监听 80 端口）
-  ⑦ RA 经 AT TCP 数据命令收 HTTP 请求 / 回配网页   ← 极简 HTTP 服务
-手机连 WeatherCfg AP → 浏览器访问 10.0.0.1 → 填 SSID/密码/城市
-  ⑧ RA 收到 POST → AT+WFTAP 停 SoftAP / WFMODE=0 + RESTART
-  ⑨ AT+WFJAPA=<ssid>,<pwd>  → +WFJAP:1 连接成功（凭据自动存 NVRAM）
-  ⑩ 回 CONNECTED 状态，配网完成 UI 提示
+长按进配网（RA 状态机 → SoftAP profile + AP 模式 + DHCP）
+  ① 按 UM-WI-003 p.49-50 写入 `AT+WFSAP` profile
+  ② STA 模式配置后按手册重启，并等待 `+INIT:DONE,1`
+  ③ 配置 AP 口 `AT+NWIP=1,...` 与 `AT+NWDHR` / `AT+NWDHS`
+  ④ `AT+TCPDATAMODE=1` 配置 hex 收包，`AT+TRTS=8080` 开 TCP server
+     等待 `+TRCTS:0,<ip>,<port>`；按 `+TRDTS` 长度解码请求，用 raw `<ESC>S` 回复
+手机连配网 AP → 浏览器访问 `http://192.168.1.100:8080/` → RA 返回表单并处理 POST
+手机连配网 AP → 配网页提交 STA 凭据/城市 → 回复成功后停 SoftAP
+  ⑤ 配置 STA 模式并重启 → 等 `+INIT:DONE,0`
+  ⑥ `AT+WFJAPA=<ssid>,<pwd>` → 等 OK 与 `+WFJAP:1` → 回联网状态
 ```
 
-- 配网页直连 IP（GD32 版同样是提示 `Open 192.168.1.100`，非强制 DNS 劫持），第一版不做 captive DNS
-- 页面极简单表单（SSID/密码/城市），RA 侧 HTTP 解析只需处理 `GET /` 与 `POST /cfg`，缓冲按 §9 风险5 规格
-- 开机有凭据 → `AT+RESTART` 自动回连（风险4 实测确认）或 `AT+WFCAP` 兜底；无凭据/连接失败 3 次 → 长按进配网
+- 目标页面直连 IP、字段按 GD32 页面 (`tools/portal.html`)：SSID / password / city；但页面只被手机看到、或看到 lwIP 默认欢迎页，不代表配置门户已接通
+- RA HTML、表单解析和 HTTP parser 已有端口8080 GET/POST 实机日志验证；仍需回归 `+TRDTS`/`+TRCTS`/`+TRXTS` 和 TCP send 命令 framing/URC 顺序的异常及重复进出场景
+- 开机先强制 DA16200 进入 STA 并等待 `+INIT:DONE,0`，之后才按 Data Flash 中的凭据启动联网阶梯；连接失败 3 次 → 长按进配网
 
 ### 8.1 GD32 版"进配网不生效"根因分析与 RA 侧对策（必做项）
 
@@ -380,9 +385,9 @@ GD32 版在连接失败等状态下长按切配网有概率不生效，源码分
 
 | # | 事项 | 如何确认 |
 |---|---|---|
-| 8 | **`AT+TR*` TCP Server 命令族**：开监听（TRTS）、数据收发/URC 语法、单次数据长度上限 | `AT+` 命令列表 + `HELP AT+TR...` + webinar 讲义原文（见 §11）。命令表已确认存在：`TRTS`(server)/`TRTC`(client)/`TRUR`/`TRPRT`/`TRPALL`/`TRTALL`/`TRSAVE`/`TRUSE`/`TRSSL*`，另有 **`AT+TCPDATAMODE`**（TCP 数据透传模式）与 **`AT+PROVSTART`/`AT+PROVSTAT`**（**模块自带配网，阶段4 可能不必自建 HTTP 服务**）。优先查 `HELP AT+PROVSTART` |
-| 9 | 配网流程模式切换时序：WFMODE 切换 + RESTART 期间 URC、`+WFJAP` 与 TCP Server 共存状态 | 阶段4前用串口手工演练完整 §8 序列 |
-| 10 | RA 侧极简 HTTP 服务资源：配网页 HTML ≤1KB、4KB 缓冲够 POST body | 阶段4实现时验证 |
+| 8 | **`TRTS` 在 SoftAP mode 的 AT 运行行为** | **✅ 已板测通过**：本项目 AT 固件 `WFMODE=1` 后 `AT+TRTS=8080` → `OK`，手机作为 TCP client 连入并触发 `+TRCTS`。虽然 UM-WI-003 p.112 有 connected-to-AP prerequisite，R01AN7287 SoftAP 示例与当前实测均支持该用法。 |
+| 9 | **RA-hosted HTTP over AT TCP** | **✅ 核心流程已由 `33 - 副本.txt` 板测通过**：8080 GET `/`、`/favicon.ico`、POST `/cfg` 均到达 RA；POST 响应后 TCP close、SoftAP teardown、STA reconnect 成功。端口80观察到 DA16200 LWIP 内容，改访问 8080 后看到 RA 页面。仍待重测失败输入与健壮性用例。 |
+| 10 | **SoftAP 回 STA + RA 持久化** | **STA 回连已板测通过**（`+WFJAP:1`）；RA Data Flash 双槽实现已编译，写入/重启读回/断电保留还未板测；最新开机强制 STA 版本用户反馈正常。 |
 
 其他已知项：
 
@@ -390,7 +395,7 @@ GD32 版在连接失败等状态下长按切配网有概率不生效，源码分
 |---|---|---|
 | 6 | ~~OLED 接线~~ 已确认与 `RA4M2OLED` 示例一致；剩余：机械按键 P005/P006 的极性/上拉方式 | 实现时看原理图或实测 |
 | 7 | 心知天气免费版限频 ~20 次/时 | 沿用 15 分钟刷新即可 |
-| 11 | **DA16200「要插拔几次才正常」** | **✅ 已清零：URC 一次性 + 只复位 RA 板子，不是硬件问题**。`+WFJAP:1` 只在模块上电时发一次；只复位 RA 时它早发完了，RA 等不到，而模块其实一直连着。修法：阶梯第一级改为主动 `AT+NWIP=?` 查 IP（`56a41ae`）。<br>⚠ 本条曾被**错误诊断过一次**：中途仅凭 `ERROR:-7` 断定"NVRAM 无 profile、模块不自连"，是用户指出"之前成功拉到过天气"才纠正。教训：`ERROR:-7` 在"已连接"状态下的语义是"不必再连"，不能当成"无 profile"。<br>另一条假象：中途"程序不动了"是诊断日志把 4KB USB TX 环灌满、`__io_putchar()` 静默丢字节所致（`a17d448`），已定死"诊断日志必须低频"的约定（doc/README.md §3.4.1） |
+| 11 | **DA16200 启动误留在 SoftAP** | **✅ 修复并由用户 RFP 烧写确认当前版本正常**。旧版开机直接执行 `WFSTA/WFCAP/WFJAPA`，模块在 `WFMODE=1` 时返回 `ERROR:-5`；新版先 `WFTAP → WFMODE=0 → RESTART` 并等待 `+INIT:DONE,0`，随后才跑联网阶梯。模块只复位 RA、DA16200 未重启时的旧一次性 URC 风险仍需注意。<br>另一条假象：中途"程序不动了"是诊断日志把 4KB USB TX 环灌满、`__io_putchar()` 静默丢字节所致（`a17d448`），已定死"诊断日志必须低频"的约定（doc/README.md §3.4.1） |
 | 12 | 天气链路「收到完整响应但不解析」 | **待清零**（此前被联网问题挡在前面）。已排除：`s.cmd` 归属错分发（`be68f18`）、`weather_http_busy()` 被提前清（`be68f18`）、`line_overflow` 粘住（已验证正常清除）、`+NWHTCSTATUS` 前缀匹配（逐字节核对无误）、`split_http` 边界（已审，无越界）。下次用 `[ENG] close=` 的 `plus`/`nw`/`len` 与 `[hb]` 的 `rx` 定位 |
 
 ## 10. 决策记录（全部已确认）

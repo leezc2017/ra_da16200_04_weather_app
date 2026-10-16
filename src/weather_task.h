@@ -60,6 +60,8 @@ void         weather_task_result_line(char * buf, uint16_t size);
  */
 wifi_status_t weather_task_wifi_status(void);
 bool          weather_task_weather_valid(void);
+bool          weather_task_provisioning_active(void);
+void          weather_task_tcp_urc(const char *line, uint16_t length);
 
 /**
  * @brief 触发一次天气刷新（按键短按用）

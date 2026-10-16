@@ -23,6 +23,8 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "weather_task.h"
 #include "weather_cfg.h"
@@ -34,11 +36,14 @@
 #include "weather_ui.h"
 #include "key_scan.h"
 #include "oled_port.h"
+#include "provisioning_portal.h"
+#include "hal_data.h"
 
 /** 命令归属：决定引擎结果交给谁处理 */
 typedef enum {
     CMD_NONE = 0,      /**< 无命令在途 */
     CMD_AT,            /**< AT 自检: 启动时先验证模块响应 */
+    CMD_BOOT_STA,      /**< Force DA16200 into STA mode during RA boot */
     CMD_TIME,          /**< AT+TIME */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
@@ -46,6 +51,8 @@ typedef enum {
     CMD_WFSTA,         /**< AT+WFSTA: 权威连接状态（手册 L1149：+WFSTA:1 已关联 / 0 未关联） */
     CMD_WFCAP,         /**< AT+WFCAP: 用 NVRAM 已存 profile 连接 */
     CMD_WFJAPA,        /**< AT+WFJAPA: 连接并写入 NVRAM */
+    CMD_PROV_AT,       /**< Provisioning control AT command */
+    CMD_PROV_RAW,      /**< ESC-S TCP reply is in flight */
     CMD_HTTP_NOW,      /**< AT+NWHTC now.json */
     CMD_HTTP_DAILY     /**< AT+NWHTC daily.json */
 } cmd_owner_t;
@@ -80,6 +87,73 @@ typedef enum {
 
 /** 最高阶梯连续失败这么多次后, 退回到第一级重跑整条链 */
 #define WIFI_WFJAPA_MAX_TRY  3U
+
+/* Non-blocking DA16200 SoftAP portal phases. Every AT phase advances only after
+ * its command completes; reboot/TCP response delays are deadline based. */
+#define PROV_STEP_IDLE          0U
+#define PROV_STEP_AP_DISCONNECT 1U
+#define PROV_STEP_AP_MODE       2U
+#define PROV_STEP_AP_PROFILE    3U
+#define PROV_STEP_AP_REBOOT     4U
+#define PROV_STEP_AP_BOOT       5U
+#define PROV_STEP_AP_IP         6U
+#define PROV_STEP_DHCP_STOP     7U
+#define PROV_STEP_DHCP_RANGE    8U
+#define PROV_STEP_DHCP_START    9U
+#define PROV_STEP_TCP_MODE      10U
+#define PROV_STEP_TCP_LISTEN    11U
+#define PROV_STEP_SERVING       12U
+#define PROV_STEP_TX_PENDING    13U
+#define PROV_STEP_STA_TEARDOWN  14U
+#define PROV_STEP_STA_MODE      15U
+#define PROV_STEP_STA_REBOOT    16U
+#define PROV_STEP_STA_BOOT      17U
+#define PROV_STEP_STA_JOIN      18U
+#define PROV_STEP_FAILED        19U
+#define PROV_STEP_AP_BOOT_DONE  21U
+#define PROV_STEP_TCP_CLOSE     22U
+
+#define PROV_AP_BOOT_DELAY_MS   4000U
+#define PROV_STA_BOOT_DELAY_MS  4000U
+#define PROV_TCP_REPLY_DELAY_MS 150U
+
+#define BOOT_STA_STEP_WFTAP      0U
+#define BOOT_STA_STEP_WFMODE     1U
+#define BOOT_STA_STEP_RESTART    2U
+#define BOOT_STA_STEP_WAIT_INIT  3U
+#define BOOT_STA_STEP_READY      4U
+#define BOOT_STA_INIT_TIMEOUT_MS 8000U
+
+/* Reserve the final 384 bytes of the 8 KiB Data Flash for two settings slots.
+ * Slot/block geometry is asserted against the RA4M2 FSP capabilities below. */
+#define WEATHER_CFG_FLASH_BASE       (0x08001E80UL)
+#define WEATHER_CFG_SLOT_SIZE        (192U)
+#define WEATHER_CFG_SLOT_COUNT       (2U)
+#define WEATHER_CFG_MAGIC            (0x57434647UL)
+#define WEATHER_CFG_VERSION          (1U)
+#define WEATHER_CFG_COMMIT           (0x434F4D54UL)
+
+typedef struct
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t record_size;
+    uint32_t sequence;
+    char ssid[33];
+    char password[64];
+    char city[33];
+    uint32_t crc32;
+    uint32_t commit;
+    uint8_t reserved[40];
+} weather_cfg_record_t;
+
+_Static_assert(sizeof(weather_cfg_record_t) == WEATHER_CFG_SLOT_SIZE,
+               "weather config slot must be 192 bytes");
+_Static_assert((WEATHER_CFG_SLOT_SIZE % BSP_FEATURE_FLASH_HP_DF_BLOCK_SIZE) == 0U,
+               "config slot must align to Data Flash erase blocks");
+_Static_assert((WEATHER_CFG_SLOT_SIZE % BSP_FEATURE_FLASH_HP_DF_WRITE_SIZE) == 0U,
+               "config slot must align to Data Flash write units");
+
 
 /**
  * @brief 同一个阶梯状态最多隔多少次重试再打一次日志
@@ -132,7 +206,10 @@ static struct {
     uint8_t  page;              /**< 0=主页 1=WiFi信息 */
     bool     ui_dirty;
     char     ip[16];
+    char     city[33];
     char     ssid[33];
+    char     provision_password[64];
+    char     provision_city[33];
     uint8_t  fails;
 
     /* 命令归属 */
@@ -150,7 +227,44 @@ static struct {
     uint32_t hb_fast;      /**< fetch 在途时的 1s 心跳时基 */
     uint32_t fetch_t0;     /**< 本次 fetch 发起时刻, 供 OLED 显示已等秒数 */
     uint32_t fetch_sec;    /**< 上次刷新的已等秒数, 变了就置 ui_dirty 重绘 */
+    bool boot_sta_ready;
+    uint8_t boot_sta_step;
+    uint8_t boot_sta_command_step;
+    uint32_t boot_sta_deadline;
+    uint8_t boot_sta_restart_retries;
+    bool provision_requested;
+    bool provision_active;
+    bool provision_config_pending;
+    bool provision_connect_accepted;
+    bool provision_sta_connected;
+    uint8_t provision_step;
+    uint8_t provision_command_step;
+    uint32_t provision_deadline;
+    char provision_peer_ip[16];
+    uint16_t provision_peer_port;
+    char provision_rx[PROVISIONING_REQUEST_MAX + 1U];
+    uint16_t provision_rx_len;
+    char provision_tx[PROVISIONING_TX_MAX];
+    uint16_t provision_tx_len;
+    uint32_t provision_tx_done_mark;
+    uint8_t provision_tx_next_step;
+    bool provision_city_valid;
 } s;
+
+extern bool wifi_uart_write_async(const uint8_t *data, uint16_t length);
+extern bool wifi_uart_write_busy(void);
+extern uint32_t wifi_uart_write_done_count(void);
+
+static bool provision_cmd_complete(at_result_t result);
+static void provision_poll(uint32_t now);
+static void provision_start(void);
+static void provision_http_service(void);
+static bool provision_send_at(const char *command, uint32_t timeout_ms, uint8_t next);
+static bool provision_send_tcp(const char *payload, size_t length, uint8_t next);
+static bool weather_cfg_load(void);
+static bool weather_cfg_save(const provisioning_config_t *config);
+static void weather_cfg_restore_defaults(void);
+static void boot_sta_poll(uint32_t now);
 
 /* hal_entry.c 的诊断计数器(判断日志/数据是否被丢) */
 extern volatile uint32_t usb_tx_drop_cnt;
@@ -259,6 +373,7 @@ static const char * cmd_st_name (cmd_owner_t c)
     {
         case CMD_NONE:    return "none";
         case CMD_AT:      return "AT";
+        case CMD_BOOT_STA:return "BOOT-STA";
         case CMD_TIME:    return "TIME";
         case CMD_TZSET:   return "TZONE";
         case CMD_SNTP:    return "SNTP";
@@ -266,6 +381,8 @@ static const char * cmd_st_name (cmd_owner_t c)
         case CMD_WFSTA:   return "WFSTA";
         case CMD_WFCAP:   return "WFCAP";
         case CMD_WFJAPA:  return "WFJAPA";
+        case CMD_PROV_AT: return "PROV-AT";
+        case CMD_PROV_RAW:return "PROV-TX";
         case CMD_HTTP_NOW:   return "NWHTC-NOW";
         case CMD_HTTP_DAILY: return "NWHTC-DAY";
         default:          return "?";
@@ -406,9 +523,6 @@ static void mark_connected (const char * how)
     s.sntp_done    = false;
     s.tz_fail      = 0U;      /* 每次重新连上都要清零, 否则沿用上一轮的失败计数 */
     s.wifi_try     = 0U;
-    /* 阶段2 硬编码 SSID 连的，与配置里的名字对齐即可；
-     * 阶段4 配网拿到真 SSID 后改为从配置/存储读。 */
-    snprintf(s.ssid, sizeof(s.ssid), "%s", WEATHER_DEFAULT_SSID);
     printf("[wx] CONNECTED via %s, ip=%s\r\n", how, s.ip);
 }
 
@@ -535,6 +649,9 @@ static bool at_send_owned (const char * cmd, uint32_t tmo, cmd_owner_t owner)
 {
     at_result_t r;
 
+    if (s.provision_active && (owner != CMD_PROV_AT) &&
+        !((owner == CMD_WFJAPA) && (s.provision_step == PROV_STEP_STA_JOIN)))
+        return false;
     if (!at_engine_idle())
     {
         return false;
@@ -546,6 +663,215 @@ static bool at_send_owned (const char * cmd, uint32_t tmo, cmd_owner_t owner)
         return false;
     }
     s.cmd = owner;
+    return true;
+}
+
+static bool provision_send_at(const char *command, uint32_t timeout_ms, uint8_t next)
+{
+    s.provision_command_step = s.provision_step;
+    if (!at_send_owned(command, timeout_ms, CMD_PROV_AT)) return false;
+    s.provision_step = next;
+    return true;
+}
+
+static bool provision_send_tcp(const char *payload, size_t length, uint8_t next)
+{
+    char prefix[64];
+    int prefix_len;
+    if ((NULL == payload) || (0U == length) ||
+        (length + 64U > sizeof(s.provision_tx)) || (s.provision_peer_port == 0U) ||
+        wifi_uart_write_busy()) return false;
+
+    /* UM-WI-003 p.116: ESC S <cid><length>,<remote_ip>,<remote_port>,r,<data>.
+     * Shift first because callers may pass s.provision_tx as the payload. */
+    prefix_len = snprintf(prefix, sizeof(prefix), "\x1B" "S0%u,%s,%u,r,", (unsigned)length,
+                          s.provision_peer_ip, (unsigned)s.provision_peer_port);
+    if ((prefix_len <= 0) || ((size_t)prefix_len >= sizeof(prefix)) ||
+        ((size_t)prefix_len + length > sizeof(s.provision_tx))) return false;
+    memmove(s.provision_tx + (size_t)prefix_len, payload, length);
+    memcpy(s.provision_tx, prefix, (size_t)prefix_len);
+    s.provision_tx_len = (uint16_t)((size_t)prefix_len + length);
+    s.provision_tx_done_mark = wifi_uart_write_done_count();
+    s.provision_tx_next_step = next;
+    if (!wifi_uart_write_async((const uint8_t *)s.provision_tx, s.provision_tx_len)) return false;
+    s.provision_step = PROV_STEP_TX_PENDING;
+    s.cmd = CMD_PROV_RAW;
+    return true;
+}
+
+static uint32_t weather_cfg_crc32(const uint8_t *data, size_t length)
+{
+    uint32_t crc = 0xFFFFFFFFUL;
+    size_t i;
+    for (i = 0U; i < length; i++)
+    {
+        uint8_t bit;
+        crc ^= data[i];
+        for (bit = 0U; bit < 8U; bit++)
+            crc = (crc & 1U) ? ((crc >> 1) ^ 0xEDB88320UL) : (crc >> 1);
+    }
+    return ~crc;
+}
+
+static bool weather_cfg_record_valid(const weather_cfg_record_t *record)
+{
+    if ((record->magic != WEATHER_CFG_MAGIC) ||
+        (record->version != WEATHER_CFG_VERSION) ||
+        (record->record_size != sizeof(*record)) ||
+        (record->commit != WEATHER_CFG_COMMIT) ||
+        (NULL == memchr(record->ssid, '\0', sizeof(record->ssid))) ||
+        (NULL == memchr(record->password, '\0', sizeof(record->password))) ||
+        (NULL == memchr(record->city, '\0', sizeof(record->city))) ||
+        (record->ssid[0] == '\0') ||
+        (strlen(record->password) < 8U) || (strlen(record->password) > 63U))
+        return false;
+    return record->crc32 == weather_cfg_crc32((const uint8_t *)record,
+                                               offsetof(weather_cfg_record_t, crc32));
+}
+
+static bool weather_cfg_read_slot(uint32_t slot, weather_cfg_record_t *record)
+{
+    const uintptr_t address = (uintptr_t)WEATHER_CFG_FLASH_BASE +
+                              ((uintptr_t)slot * WEATHER_CFG_SLOT_SIZE);
+    memcpy(record, (const void *)address, sizeof(*record));
+    return weather_cfg_record_valid(record);
+}
+
+static bool weather_cfg_load(void)
+{
+    weather_cfg_record_t a;
+    weather_cfg_record_t b;
+    bool valid_a;
+    bool valid_b;
+    const weather_cfg_record_t *selected;
+    fsp_err_t err;
+
+    if ((NULL == g_flash0.p_api) ||
+        (g_flash0.p_api->open(g_flash0.p_ctrl, g_flash0.p_cfg) != FSP_SUCCESS))
+        return false;
+    valid_a = weather_cfg_read_slot(0U, &a);
+    valid_b = weather_cfg_read_slot(1U, &b);
+    err = g_flash0.p_api->close(g_flash0.p_ctrl);
+    if (FSP_SUCCESS != err) return false;
+    if (!valid_a && !valid_b) return false;
+
+    /* Signed subtraction handles sequence wrap as long as slots are not more
+     * than 2^31 commits apart (which is far beyond the flash endurance). */
+    selected = (!valid_a) ? &b : ((!valid_b) ? &a :
+                (((int32_t)(b.sequence - a.sequence) > 0) ? &b : &a));
+    snprintf(s.ssid, sizeof(s.ssid), "%s", selected->ssid);
+    snprintf(s.provision_password, sizeof(s.provision_password), "%s", selected->password);
+    snprintf(s.city, sizeof(s.city), "%s", selected->city);
+    s.provision_city_valid = (selected->city[0] != '\0');
+    printf("[cfg] loaded RA Data Flash settings (sequence=%lu)\r\n",
+           (unsigned long)selected->sequence);
+    return true;
+}
+
+static void weather_cfg_restore_defaults(void)
+{
+    if (!weather_cfg_load())
+    {
+        snprintf(s.ssid, sizeof(s.ssid), "%s", WEATHER_DEFAULT_SSID);
+        snprintf(s.provision_password, sizeof(s.provision_password), "%s", WEATHER_DEFAULT_PWD);
+        snprintf(s.city, sizeof(s.city), "%s", WEATHER_CITY);
+        s.provision_city_valid = false;
+        printf("[cfg] restored compiled defaults (no committed record)\r\n");
+    }
+}
+
+static bool weather_cfg_save(const provisioning_config_t *config)
+{
+    weather_cfg_record_t a;
+    weather_cfg_record_t b;
+    weather_cfg_record_t record;
+    weather_cfg_record_t verify;
+    bool valid_a;
+    bool valid_b;
+    uint32_t target_slot;
+    uint32_t next_sequence;
+    uint32_t target_address;
+    fsp_err_t err;
+
+    if ((NULL == config) || (NULL == g_flash0.p_api) ||
+        (config->ssid[0] == '\0') || (strlen(config->ssid) >= sizeof(record.ssid)) ||
+        (strlen(config->password) < 8U) || (strlen(config->password) > 63U) ||
+        (strlen(config->city) >= sizeof(record.city)))
+        return false;
+    if (g_flash0.p_api->open(g_flash0.p_ctrl, g_flash0.p_cfg) != FSP_SUCCESS)
+        return false;
+
+    valid_a = weather_cfg_read_slot(0U, &a);
+    valid_b = weather_cfg_read_slot(1U, &b);
+    if (!valid_a && !valid_b)
+    {
+        target_slot = 0U;
+        next_sequence = 1U;
+    }
+    else if (!valid_a)
+    {
+        target_slot = 0U;
+        next_sequence = b.sequence + 1U;
+    }
+    else if (!valid_b)
+    {
+        target_slot = 1U;
+        next_sequence = a.sequence + 1U;
+    }
+    else if ((int32_t)(b.sequence - a.sequence) > 0)
+    {
+        target_slot = 0U;
+        next_sequence = b.sequence + 1U;
+    }
+    else
+    {
+        target_slot = 1U;
+        next_sequence = a.sequence + 1U;
+    }
+
+    memset(&record, 0xFF, sizeof(record));
+    record.magic = WEATHER_CFG_MAGIC;
+    record.version = WEATHER_CFG_VERSION;
+    record.record_size = (uint16_t)sizeof(record);
+    record.sequence = next_sequence;
+    memset(record.ssid, 0, sizeof(record.ssid));
+    memset(record.password, 0, sizeof(record.password));
+    memset(record.city, 0, sizeof(record.city));
+    snprintf(record.ssid, sizeof(record.ssid), "%s", config->ssid);
+    snprintf(record.password, sizeof(record.password), "%s", config->password);
+    snprintf(record.city, sizeof(record.city), "%s", config->city);
+    record.crc32 = weather_cfg_crc32((const uint8_t *)&record,
+                                     offsetof(weather_cfg_record_t, crc32));
+    record.commit = WEATHER_CFG_COMMIT;
+    memset(record.reserved, 0xFF, sizeof(record.reserved));
+
+    target_address = WEATHER_CFG_FLASH_BASE + (target_slot * WEATHER_CFG_SLOT_SIZE);
+    err = g_flash0.p_api->erase(g_flash0.p_ctrl, target_address,
+                                WEATHER_CFG_SLOT_SIZE / BSP_FEATURE_FLASH_HP_DF_BLOCK_SIZE);
+    if (FSP_SUCCESS == err)
+    {
+        err = g_flash0.p_api->write(g_flash0.p_ctrl, (uint32_t)(uintptr_t)&record,
+                                    target_address, sizeof(record));
+    }
+    if (FSP_SUCCESS == err)
+    {
+        memcpy(&verify, (const void *)(uintptr_t)target_address, sizeof(verify));
+        if (!weather_cfg_record_valid(&verify) ||
+            (0 != memcmp(&record, &verify, sizeof(record))))
+            err = FSP_ERR_WRITE_FAILED;
+    }
+    {
+        const fsp_err_t close_err = g_flash0.p_api->close(g_flash0.p_ctrl);
+        if ((FSP_SUCCESS == err) && (FSP_SUCCESS != close_err)) err = close_err;
+    }
+    if (FSP_SUCCESS != err)
+    {
+        printf("[cfg] Data Flash save failed: %d\r\n", (int)err);
+        return false;
+    }
+
+    printf("[cfg] Data Flash slot %lu committed (sequence=%lu)\r\n",
+           (unsigned long)target_slot, (unsigned long)next_sequence);
     return true;
 }
 
@@ -652,13 +978,13 @@ static void build_url (char * buf, uint16_t size, bool daily)
         snprintf(buf, size,
                  "http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=%s&unit=c&start=0&days=1",
                  WEATHER_API_KEY,
-                 ('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip",
+                  (s.city[0] != '\0') ? s.city : (('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip"),
                  WEATHER_LANG);
     } else {
         snprintf(buf, size,
                  "http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=%s",
                  WEATHER_API_KEY,
-                 ('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip",
+                  (s.city[0] != '\0') ? s.city : (('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip"),
                  WEATHER_LANG);
     }
 }
@@ -804,24 +1130,64 @@ static void on_cmd_done (at_result_t r)
 {
     char time5[6];
     char date11[8];
-    bool start_link = false;
 
     switch (s.cmd)
     {
         case CMD_AT:
-            /* ⚠ 自检失败是**常态**，不是故障（2026-10-03 实测）：
-             *   冷启动第一条 AT 常只收到半个 'O' 就被模块自己吞掉，
-             *   引擎报 TIMEOUT@WAIT，但紧接着的 AT+NWIP=? 完全正常。
-             * 所以这里只记日志，绝不据此判定模块死活 —— 真正判定联网状态
-             * 靠阶梯第一级的 AT+NWIP=? 回读。 */
+            /* 冷启动 AT 自检可能被截断；不以自检结果判定模块死活。
+             * 后续启动模式收敛会尝试 STA 配置，并等待模块重启 URC。 */
             printf("[wx] AT self-test: %s (cold-start may truncate reply)\r\n",
                    (AT_RES_OK == r) ? "OK" :
                    ((AT_RES_TIMEOUT == r) ? "TIMEOUT (normal on cold start)" : "ERROR"));
-            /* 自检是上电后第一条命令, 等它结束就证明串口通了。此时立刻发
-             * AT+NWIP=?, 不必再空等一个 WEATHER_CONNECT_TIMEOUT_MS 周期 ——
-             * 实测该查询 ~50ms 就回, 白等 8s 只会让首屏多黑 8 秒。
-             * 注意发送要放在函数末尾(清完 s.cmd 之后), 否则会被覆盖。 */
-            start_link = (CMD_NONE != s.cmd);
+            printf("[wx] AT self-test complete; boot STA mode enforcement follows\r\n");
+            break;
+
+        case CMD_BOOT_STA:
+            if (AT_RES_OK != r)
+            {
+                if ((s.boot_sta_command_step == BOOT_STA_STEP_WFTAP) &&
+                    (r == AT_RES_ERR))
+                {
+                    /* WFTAP may be rejected when the SoftAP interface is
+                     * already down. Still explicitly select STA and restart. */
+                    printf("[wx] WFTAP rejected (err=%d); continue with WFMODE=0\r\n",
+                           at_engine_resp()->err_code);
+                    s.boot_sta_step = BOOT_STA_STEP_WFMODE;
+                    break;
+                }
+                printf("[wx] boot STA command step %u failed r=%d err=%d\r\n",
+                       (unsigned)s.boot_sta_command_step, (int)r,
+                       at_engine_resp()->err_code);
+                if (s.boot_sta_restart_retries < 2U)
+                {
+                    s.boot_sta_restart_retries++;
+                    s.boot_sta_step = BOOT_STA_STEP_WFTAP;
+                    printf("[wx] retry STA mode enforcement (%u/2)\r\n",
+                           (unsigned)s.boot_sta_restart_retries);
+                }
+                else
+                {
+                    s.boot_sta_step = BOOT_STA_STEP_READY;
+                    s.status = WIFI_STAT_FAIL;
+                    s.fails++;
+                    s.ui_dirty = true;
+                }
+                break;
+            }
+            if (s.boot_sta_command_step == BOOT_STA_STEP_WFTAP)
+            {
+                s.boot_sta_step = BOOT_STA_STEP_WFMODE;
+            }
+            else if (s.boot_sta_command_step == BOOT_STA_STEP_WFMODE)
+            {
+                s.boot_sta_step = BOOT_STA_STEP_RESTART;
+            }
+            else if (s.boot_sta_command_step == BOOT_STA_STEP_RESTART)
+            {
+                s.boot_sta_step = BOOT_STA_STEP_WAIT_INIT;
+                s.boot_sta_deadline = at_engine_now_ms() + BOOT_STA_INIT_TIMEOUT_MS;
+                printf("[wx] module restart requested in STA mode; waiting +INIT:DONE,0\r\n");
+            }
             break;
 
         case CMD_TIME:
@@ -913,7 +1279,23 @@ static void on_cmd_done (at_result_t r)
             /* 失败计数放在这里而不是 poll 里: on_cmd_done 每条命令只跑一次，
              * 若在 poll 里按 tick 自增, 10ms 一跳几秒就误判"用尽"。
              * ⚠ 已连上时不计失败: 命令本身回 OK, 且不该再退阶梯。 */
-            if ((AT_RES_OK != r) && (WIFI_STAT_CONNECTED != s.status))
+            if ((AT_RES_OK != r) && s.provision_active &&
+                (s.provision_step == PROV_STEP_STA_JOIN))
+            {
+                s.provision_connect_accepted = false;
+                s.provision_sta_connected = false;
+                s.wifi_try++;
+                if (s.wifi_try >= WIFI_WFJAPA_MAX_TRY)
+                {
+                    s.provision_active = false;
+                    s.provision_step = PROV_STEP_IDLE;
+                    weather_cfg_restore_defaults();
+                    s.status = WIFI_STAT_FAIL;
+                    s.fails++;
+                    s.ui_dirty = true;
+                }
+            }
+            else if ((AT_RES_OK != r) && (WIFI_STAT_CONNECTED != s.status))
             {
                 s.wifi_try++;
                 if (s.wifi_try >= WIFI_WFJAPA_MAX_TRY)
@@ -925,6 +1307,20 @@ static void on_cmd_done (at_result_t r)
                     s.connect_t0 = at_engine_now_ms();
                 }
             }
+            if (s.provision_active && (s.provision_step == PROV_STEP_STA_JOIN) &&
+                (AT_RES_OK == r))
+            {
+                s.provision_connect_accepted = true;
+                s.provision_sta_connected = false;
+                s.provision_deadline = at_engine_now_ms() + 30000U;
+            }
+            break;
+
+        case CMD_PROV_AT:
+            (void)provision_cmd_complete(r);
+            break;
+        case CMD_PROV_RAW:
+            /* UART transmit completion is polled separately. */
             break;
 
         default:
@@ -933,16 +1329,6 @@ static void on_cmd_done (at_result_t r)
 
     s.cmd = CMD_NONE;
 
-    /* 开机自检一结束就主动查 IP(见 CMD_AT 分支的注释)。
-     * 必须在此处发: 上面的 at_send_owned 会写 s.cmd, 在 switch 之前发会被覆盖。 */
-    if (start_link)
-    {
-        s.wifi_step  = WIFI_STEP_NWIP_QUERY;
-        s.connect_t0 = at_engine_now_ms();
-        /* ⚠ 2026-10-12: 原来开机第一条是 AT+NWIP=?，但那条命令**无法判断连接状态**
-         *   （第一字段是接口号，见 poll 第 2c 步注释）。换成权威的 AT+WFSTA。 */
-        (void)at_send_owned("AT+WFSTA", 2500U, CMD_WFSTA);
-    }
 }
 
 /* ===================== 时间显示 ===================== */
@@ -975,15 +1361,42 @@ static void ui_refresh (void)
 {
     char time5[6];
 
+    if (s.provision_active)
+    {
+        ui_main_view_t mv;
+        memset(&mv, 0, sizeof(mv));
+        snprintf(mv.ssid, sizeof(mv.ssid), "%s", s.ssid);
+        if (s.provision_step >= PROV_STEP_STA_TEARDOWN)
+            mv.provisioning = 2U;
+        else if ((s.provision_step >= PROV_STEP_SERVING) &&
+                 (s.provision_step < PROV_STEP_STA_TEARDOWN))
+            mv.provisioning = 1U;
+        ui_main_page(&mv, WIFI_STAT_PROVISIONING);
+        return;
+    }
+
+    if (!s.boot_sta_ready && (WIFI_STAT_FAIL != s.status))
+    {
+        ui_main_view_t mv;
+        memset(&mv, 0, sizeof(mv));
+        snprintf(mv.ssid, sizeof(mv.ssid), "%s", s.ssid);
+        mv.provisioning = 3U;
+        ui_main_page(&mv, WIFI_STAT_PROVISIONING);
+        return;
+    }
+
     if (0U == s.page)
     {
         ui_main_view_t mv;
 
         memset(&mv, 0, sizeof(mv));
         time_str_get(time5, sizeof(time5));
+        snprintf(mv.ssid, sizeof(mv.ssid), "%s", s.ssid);
         snprintf(mv.time_str, sizeof(mv.time_str), "%s", time5);
         /* Stage 1 uses Seniverse IP geolocation rather than a configured city. */
         snprintf(mv.city, sizeof(mv.city), "IP");
+        if (s.city[0] != '\0')
+            snprintf(mv.city, sizeof(mv.city), "%.15s", s.city);
 
         if (s.wx_valid)
         {
@@ -1083,27 +1496,36 @@ void weather_task_init (void)
     memset(&s, 0, sizeof(s));
     s.status     = WIFI_STAT_CONNECTING;
     s.connect_t0 = at_engine_now_ms();
-    s.wifi_step  = WIFI_STEP_NWIP_QUERY;  /* 先主动查 IP, 再考虑被动等/主动连 */
+    s.wifi_step  = WIFI_STEP_NWIP_QUERY;
+    s.boot_sta_ready = false;
+    s.boot_sta_step = BOOT_STA_STEP_WFTAP;
+    s.boot_sta_restart_retries = 0U;
     s.wifi_try   = 0U;
     s.page       = 0U;
     s.ui_dirty   = true;
     s.cmd        = CMD_NONE;
     s.hb_t0      = at_engine_now_ms();
     s.hb_fast    = s.hb_t0;
+    snprintf(s.ssid, sizeof(s.ssid), "%s", WEATHER_DEFAULT_SSID);
+    snprintf(s.provision_password, sizeof(s.provision_password), "%s", WEATHER_DEFAULT_PWD);
+    snprintf(s.city, sizeof(s.city), "%s", WEATHER_CITY);
+    if (!weather_cfg_load())
+        printf("[cfg] no valid Data Flash record; using compiled defaults (read-only)\r\n");
+    s.provision_city_valid = false;
 
     key_init();
     ui_init();
-    printf("[wx] task init: boot %s %s, first step = NWIP query\r\n",
+    printf("[wx] task init: boot %s %s, first action = force module STA mode\r\n",
            __DATE__, __TIME__);
 
     /* 用户要求: 每次开机先用 AT 命令测试模块, 再走后续联网/天气。
      *
      * ⚠ 超时只给 800ms 而不是 2000ms（2026-10-04 调整）：
-     *   实测冷启动这条 AT 必定被截断（只回 1 个字符就 TIMEOUT），它只是
+     *   实测冷启动这条 AT 可能被截断（只回 1 个字符就 TIMEOUT），它只是
      *   "模块活着没有"的形式确认。而引擎时钟是按主循环 tick 累加的，
      *   OLED 重绘一轮要 ~100ms，所以 2000ms 的引擎时间在真实时间上远不止
      *   2 秒，整轮开机白等 —— 之前"抓日志等不到结果"就有它一份。
-     *   自检失败不致命（下一条 AT+NWIP=? 才是真正判定），所以压到 800ms。
+     *   自检失败不致命；启动 STA 流程仍会尝试发送模式切换命令。
      */
     if (!at_send_owned("AT", 800U, CMD_AT))
     {
@@ -1125,6 +1547,44 @@ void weather_task_refresh_now (void)
     printf("[wx] weather refresh queued\r\n");
 }
 
+bool weather_task_provisioning_active(void)
+{
+    return s.provision_active;
+}
+
+void weather_task_tcp_urc(const char *line, uint16_t length)
+{
+    char payload[PROVISIONING_HTTP_RX_MAX];
+    size_t payload_length = 0U;
+
+    if (!s.provision_active || (NULL == line) || (0U == length)) return;
+    if (!provisioning_portal_trdts_decode(line, length, s.provision_peer_ip,
+                                          sizeof(s.provision_peer_ip),
+                                          &s.provision_peer_port, payload,
+                                          sizeof(payload), &payload_length))
+    {
+        printf("[prov] rejected malformed +TRDTS record (%u bytes)\r\n", (unsigned)length);
+        return;
+    }
+    if (s.provision_rx_len == 0U)
+        printf("[prov] +TRDTS peer=%s:%u decoded=%u first='%c'\r\n",
+               s.provision_peer_ip, (unsigned)s.provision_peer_port,
+               (unsigned)payload_length,
+               (payload_length > 0U && (uint8_t)payload[0] >= 0x20U &&
+                (uint8_t)payload[0] <= 0x7EU) ? payload[0] : '.');
+    if ((payload_length > PROVISIONING_REQUEST_MAX) ||
+        ((size_t)s.provision_rx_len + payload_length > PROVISIONING_REQUEST_MAX))
+    {
+        s.provision_rx_len = 0U;
+        printf("[prov] HTTP request buffer limit exceeded\r\n");
+        return;
+    }
+    memcpy(s.provision_rx + s.provision_rx_len, payload, payload_length);
+    s.provision_rx_len = (uint16_t)(s.provision_rx_len + payload_length);
+    s.provision_rx[s.provision_rx_len] = '\0';
+    s.ui_dirty = true;
+}
+
 wifi_status_t weather_task_wifi_status (void)
 {
     return s.status;
@@ -1133,6 +1593,513 @@ wifi_status_t weather_task_wifi_status (void)
 bool weather_task_weather_valid (void)
 {
     return s.wx_valid;
+}
+
+static void boot_sta_poll(uint32_t now)
+{
+    if (s.boot_sta_ready || s.provision_active || (CMD_NONE != s.cmd) || !at_engine_idle())
+        return;
+
+    if (s.boot_sta_step == BOOT_STA_STEP_WAIT_INIT)
+    {
+        if (at_engine_urc_take("+INIT:DONE,0"))
+        {
+            s.boot_sta_step = BOOT_STA_STEP_READY;
+            s.boot_sta_ready = true;
+            s.status = WIFI_STAT_CONNECTING;
+            s.wifi_step = WIFI_STEP_NWIP_QUERY;
+            s.wifi_try = 0U;
+            s.connect_t0 = now;
+            printf("[wx] module booted in STA mode; start normal connection ladder\r\n");
+        }
+        else if (at_engine_urc_take("+INIT:DONE,1"))
+        {
+            if (s.boot_sta_restart_retries < 2U)
+            {
+                s.boot_sta_restart_retries++;
+                printf("[wx] module still reports SoftAP mode after STA restart; retrying (%u/2)\r\n",
+                       (unsigned)s.boot_sta_restart_retries);
+                s.boot_sta_step = BOOT_STA_STEP_WFTAP;
+            }
+            else
+            {
+                printf("[wx] module remains in SoftAP mode; stop automatic STA attempts\r\n");
+                s.boot_sta_step = BOOT_STA_STEP_READY;
+                s.status = WIFI_STAT_FAIL;
+                s.fails++;
+                s.ui_dirty = true;
+            }
+        }
+        else if ((int32_t)(now - s.boot_sta_deadline) >= 0)
+        {
+            if (s.boot_sta_restart_retries < 2U)
+            {
+                s.boot_sta_restart_retries++;
+                printf("[wx] STA boot URC timeout; retry mode enforcement (%u/2)\r\n",
+                       (unsigned)s.boot_sta_restart_retries);
+                s.boot_sta_step = BOOT_STA_STEP_WFTAP;
+            }
+            else
+            {
+                printf("[wx] cannot confirm STA boot; keep network ladder stopped\r\n");
+                s.boot_sta_step = BOOT_STA_STEP_READY;
+                s.status = WIFI_STAT_FAIL;
+                s.fails++;
+                s.ui_dirty = true;
+            }
+        }
+        return;
+    }
+
+    switch (s.boot_sta_step)
+    {
+        case BOOT_STA_STEP_WFTAP:
+            s.boot_sta_command_step = BOOT_STA_STEP_WFTAP;
+            if (at_send_owned("AT+WFTAP", 3000U, CMD_BOOT_STA))
+                s.boot_sta_step = BOOT_STA_STEP_WFMODE;
+            break;
+        case BOOT_STA_STEP_WFMODE:
+            s.boot_sta_command_step = BOOT_STA_STEP_WFMODE;
+            if (at_send_owned("AT+WFMODE=0", 3000U, CMD_BOOT_STA))
+                s.boot_sta_step = BOOT_STA_STEP_RESTART;
+            break;
+        case BOOT_STA_STEP_RESTART:
+            s.boot_sta_command_step = BOOT_STA_STEP_RESTART;
+            (void)at_send_owned("AT+RESTART", 5000U, CMD_BOOT_STA);
+            break;
+        default:
+            break;
+    }
+}
+
+static void provision_http_service(void)
+{
+    char path[80];
+    size_t body_offset = 0U;
+    size_t content_length = 0U;
+    size_t total_length = 0U;
+    size_t reply_length;
+    provisioning_http_status_t parse_state;
+    if (s.provision_rx_len == 0U) return;
+    parse_state = provisioning_portal_request_state(s.provision_rx, s.provision_rx_len,
+                                                     path, sizeof(path), &body_offset,
+                                                     &content_length, &total_length);
+    if (PROVISIONING_HTTP_INCOMPLETE == parse_state) return;
+    printf("[prov] HTTP request state=%u method=%s path=%s rx=%u body=%u\r\n",
+           (unsigned)parse_state,
+           (0 == memcmp(s.provision_rx, "POST ", 5U)) ? "POST" :
+           ((0 == memcmp(s.provision_rx, "GET ", 4U)) ? "GET" : "OTHER"),
+           path, (unsigned)s.provision_rx_len, (unsigned)content_length);
+    if (PROVISIONING_HTTP_TOO_LARGE == parse_state)
+    {
+        static const char too_large[] = "HTTP/1.0 413 Payload Too Large\r\nContent-Length:0\r\nConnection: close\r\n\r\n";
+        s.provision_rx_len = 0U;
+        (void)provision_send_tcp(too_large, sizeof(too_large) - 1U, PROV_STEP_SERVING);
+        return;
+    }
+    if (PROVISIONING_HTTP_INVALID == parse_state)
+    {
+        /* Malformed or not-HTTP payload. Drop without changing portal lifetime. */
+        s.provision_rx_len = 0U;
+        return;
+    }
+
+    if (0 == memcmp(s.provision_rx, "GET ", 4U))
+    {
+        reply_length = provisioning_portal_get_response(path, s.provision_tx, sizeof(s.provision_tx));
+        s.provision_rx_len = 0U;
+        if (reply_length > 0U)
+        {
+            if (!provision_send_tcp(s.provision_tx, reply_length, PROV_STEP_SERVING))
+                printf("[prov] GET response TX queue failed (%u bytes)\r\n", (unsigned)reply_length);
+        }
+        return;
+    }
+
+    if ((0 != strcmp(path, "/cfg")) || (0 != memcmp(s.provision_rx, "POST ", 5U)))
+    {
+        static const char not_found[] = "HTTP/1.0 404 Not Found\r\nContent-Length:0\r\nConnection: close\r\n\r\n";
+        s.provision_rx_len = 0U;
+        (void)provision_send_tcp(not_found, sizeof(not_found) - 1U, PROV_STEP_SERVING);
+        return;
+    }
+
+    {
+        provisioning_config_t candidate;
+        bool parsed;
+        if ((body_offset + content_length > s.provision_rx_len) ||
+            (content_length == 0U) || (content_length > PROVISIONING_REQUEST_MAX)) return;
+        memcpy(s.provision_tx, s.provision_rx + body_offset, content_length);
+        parsed = provisioning_portal_parse(s.provision_tx, content_length, &candidate);
+        if (parsed && (candidate.ssid[0] == '\0'))
+        {
+            /* This portal requires explicit credentials; match the required
+             * browser fields instead of advertising unsupported reuse. */
+            parsed = false;
+        }
+        if (!parsed)
+        {
+            reply_length = provisioning_portal_response(false, s.provision_tx, sizeof(s.provision_tx));
+            s.provision_rx_len = 0U;
+            if (reply_length > 0U)
+                (void)provision_send_tcp(s.provision_tx, reply_length, PROV_STEP_SERVING);
+            return;
+        }
+        /* Keep submitted values staged until STA succeeds and flash is updated. */
+        snprintf(s.ssid, sizeof(s.ssid), "%s", candidate.ssid);
+        snprintf(s.provision_password, sizeof(s.provision_password), "%s", candidate.password);
+        snprintf(s.provision_city, sizeof(s.provision_city), "%s", candidate.city);
+        s.provision_connect_accepted = false;
+        /* This is intentionally not a success response: STA association and
+         * the Data Flash commit happen after the SoftAP TCP session closes. */
+        reply_length = provisioning_portal_pending_response(s.provision_tx,
+                                                             sizeof(s.provision_tx));
+        s.provision_rx_len = 0U;
+        if (reply_length > 0U)
+        {
+            if (provision_send_tcp(s.provision_tx, reply_length, PROV_STEP_TCP_CLOSE))
+                s.provision_config_pending = true;
+        }
+    }
+}
+
+static bool provision_cmd_complete(at_result_t result)
+{
+    const uint32_t now = at_engine_now_ms();
+    const uint8_t command_step = s.provision_command_step;
+    if (result != AT_RES_OK)
+    {
+        /* WFQAP is only meaningful while associated with an AP. Provisioning
+         * must also work when STA is already disconnected, so an explicit
+         * module ERROR here is non-fatal: continue with the mode switch.
+         * A timeout/abort is still fatal because it indicates a UART/engine
+         * problem rather than a rejected optional disconnect operation. */
+        if ((command_step == PROV_STEP_AP_DISCONNECT) && (result == AT_RES_ERR))
+        {
+            printf("[prov] WFQAP rejected (err=%d); continue to SoftAP mode switch\r\n",
+                   at_engine_resp()->err_code);
+            s.provision_step = PROV_STEP_AP_MODE;
+            return true;
+        }
+        if ((command_step == PROV_STEP_TCP_CLOSE) && (result == AT_RES_ERR))
+        {
+            printf("[prov] TCP session already closed (err=%d); continue teardown\r\n",
+                   at_engine_resp()->err_code);
+            s.provision_step = PROV_STEP_STA_TEARDOWN;
+            s.provision_deadline = now + PROV_TCP_REPLY_DELAY_MS;
+            return true;
+        }
+        printf("[prov] stage=%u AT failed result=%d err=%d\r\n", (unsigned)command_step,
+               (int)result, at_engine_resp()->err_code);
+        s.provision_step = PROV_STEP_FAILED;
+        s.provision_active = false;
+        s.status = WIFI_STAT_FAIL;
+        s.ui_dirty = true;
+        return false;
+    }
+
+    switch (command_step)
+    {
+        case PROV_STEP_AP_DISCONNECT:
+            s.provision_step = PROV_STEP_AP_MODE;
+            break;
+        case PROV_STEP_AP_MODE:
+            s.provision_step = PROV_STEP_AP_PROFILE;
+            break;
+        case PROV_STEP_AP_PROFILE:
+            s.provision_step = PROV_STEP_AP_REBOOT;
+            break;
+        case PROV_STEP_AP_REBOOT:
+            s.provision_step = PROV_STEP_AP_BOOT;
+            s.provision_deadline = now + PROV_AP_BOOT_DELAY_MS;
+            break;
+        case PROV_STEP_AP_IP:
+            s.provision_step = PROV_STEP_DHCP_STOP;
+            break;
+        case PROV_STEP_DHCP_STOP:
+            s.provision_step = PROV_STEP_DHCP_RANGE;
+            break;
+        case PROV_STEP_DHCP_RANGE:
+            s.provision_step = PROV_STEP_DHCP_START;
+            break;
+        case PROV_STEP_DHCP_START:
+            s.provision_step = PROV_STEP_TCP_MODE;
+            break;
+        case PROV_STEP_TCP_MODE:
+            s.provision_step = PROV_STEP_TCP_LISTEN;
+            break;
+        case PROV_STEP_TCP_LISTEN:
+            s.provision_step = PROV_STEP_SERVING;
+            s.status = WIFI_STAT_PROVISIONING;
+            s.ui_dirty = true;
+            printf("[prov] TCP listener acknowledged; open http://%s:%u/\r\n",
+                   PROVISIONING_PORTAL_IP, (unsigned)PROVISIONING_PORTAL_PORT);
+            break;
+        case PROV_STEP_TCP_CLOSE:
+            s.provision_step = PROV_STEP_STA_TEARDOWN;
+            s.provision_deadline = now + PROV_TCP_REPLY_DELAY_MS;
+            break;
+        case PROV_STEP_STA_TEARDOWN:
+            s.provision_step = PROV_STEP_STA_MODE;
+            s.provision_deadline = now + PROV_TCP_REPLY_DELAY_MS;
+            if (s.provision_city[0] != '\0')
+            {
+                snprintf(s.city, sizeof(s.city), "%s", s.provision_city);
+                s.provision_city_valid = true; /* runtime only until FSP flash is generated */
+            }
+            break;
+        case PROV_STEP_STA_MODE:
+            s.provision_step = PROV_STEP_STA_REBOOT;
+            s.provision_deadline = now + 300U;
+            break;
+        case PROV_STEP_STA_REBOOT:
+            s.provision_step = PROV_STEP_STA_BOOT;
+            s.provision_deadline = now + PROV_STA_BOOT_DELAY_MS;
+            break;
+        default:
+            break;
+    }
+    return true;
+}
+
+static void provision_start(void)
+{
+    if ((!s.boot_sta_ready && (s.status != WIFI_STAT_FAIL)) ||
+        !s.provision_requested || s.provision_active || !at_engine_idle() ||
+        weather_http_busy()) return;
+    s.provision_requested = false;
+    s.provision_active = true;
+    s.provision_city_valid = false;
+    s.provision_step = PROV_STEP_AP_DISCONNECT;
+    s.provision_config_pending = false;
+    s.provision_connect_accepted = false;
+    s.provision_sta_connected = false;
+    s.provision_rx_len = 0U;
+    s.provision_deadline = 0U;
+    s.refresh_pending = false;
+    s.status = WIFI_STAT_PROVISIONING;
+    s.ui_dirty = true;
+    key_event_flush();
+    if (!provision_send_at("AT+WFQAP", 3000U, PROV_STEP_AP_MODE))
+    {
+        s.provision_active = false;
+        s.status = WIFI_STAT_FAIL;
+    }
+    printf("[prov] entering SoftAP setup\r\n");
+}
+
+static void provision_poll(uint32_t now)
+{
+    char tcp_event[AT_URC_LINE];
+
+    if (s.provision_requested && !s.provision_active) provision_start();
+    if (!s.provision_active) return;
+
+    /* UM-WI-003 p.114-115: +TRCTS/+TRXTS report TCP-server peer connect and
+     * disconnect. Each +TRDTS record supplies the endpoint used for reply. */
+    if (at_engine_urc_get("+TRCTS:", tcp_event, sizeof(tcp_event)))
+    {
+        s.provision_rx_len = 0U;
+        s.provision_peer_port = 0U;
+        printf("[prov] TCP client connected: %s\r\n", tcp_event + 7U);
+        s.ui_dirty = true;
+    }
+    if (at_engine_urc_get("+TRXTS:", tcp_event, sizeof(tcp_event)))
+    {
+        printf("[prov] TCP client disconnected: %s\r\n", tcp_event + 7U);
+        s.provision_rx_len = 0U;
+        s.provision_peer_port = 0U;
+        s.ui_dirty = true;
+    }
+
+    if ((s.cmd == CMD_PROV_RAW) && !wifi_uart_write_busy() &&
+        (wifi_uart_write_done_count() != s.provision_tx_done_mark))
+    {
+        s.cmd = CMD_NONE;
+        if (s.provision_step == PROV_STEP_TX_PENDING)
+        {
+            s.provision_step = s.provision_tx_next_step;
+            if (s.provision_config_pending && (s.provision_step == PROV_STEP_TCP_CLOSE))
+                s.provision_deadline = now + PROV_TCP_REPLY_DELAY_MS;
+        }
+    }
+
+    if (s.provision_step == PROV_STEP_SERVING && (CMD_NONE == s.cmd))
+        provision_http_service();
+    if ((CMD_NONE != s.cmd) || !at_engine_idle()) return;
+
+    if (s.provision_step == PROV_STEP_STA_JOIN)
+    {
+        if (!s.provision_connect_accepted)
+        {
+            char command[160];
+            snprintf(command, sizeof(command), "AT+WFJAPA=%s,%s", s.ssid, s.provision_password);
+            if (at_send_owned(command, 30000U, CMD_WFJAPA))
+            {
+                s.provision_connect_accepted = true;
+                s.provision_deadline = now + 30000U;
+            }
+        }
+        else if (at_engine_urc_take("+WFJAP:1"))
+        {
+            s.provision_sta_connected = true;
+        }
+
+        if (s.provision_sta_connected)
+        {
+            provisioning_config_t accepted;
+            snprintf(accepted.ssid, sizeof(accepted.ssid), "%s", s.ssid);
+            snprintf(accepted.password, sizeof(accepted.password), "%s", s.provision_password);
+            snprintf(accepted.city, sizeof(accepted.city), "%s", s.provision_city);
+            if (!weather_cfg_save(&accepted))
+            {
+                /* The old committed slot remains valid. Restore it as the
+                 * source for any later retry/reconnect. */
+                weather_cfg_restore_defaults();
+                s.provision_active = false;
+                s.provision_step = PROV_STEP_FAILED;
+                s.provision_connect_accepted = false;
+                s.provision_sta_connected = false;
+                s.status = WIFI_STAT_FAIL;
+                s.fails++;
+                s.ui_dirty = true;
+                return;
+            }
+            snprintf(s.city, sizeof(s.city), "%s", accepted.city);
+            s.provision_city_valid = (accepted.city[0] != '\0');
+            s.provision_active = false;
+            s.provision_step = PROV_STEP_IDLE;
+            s.provision_connect_accepted = false;
+            s.provision_sta_connected = false;
+            s.status = WIFI_STAT_CONNECTING;
+            s.wifi_step = WIFI_STEP_NWIP_QUERY;
+            s.wifi_try = 0U;
+            s.connect_t0 = now;
+            s.ui_dirty = true;
+        }
+        else if (at_engine_urc_take("+WFJAP:0") ||
+                 ((int32_t)(now - s.provision_deadline) >= 0))
+        {
+            s.provision_connect_accepted = false;
+            s.wifi_try++;
+            if (s.wifi_try >= WIFI_WFJAPA_MAX_TRY)
+            {
+                s.provision_active = false;
+                s.provision_step = PROV_STEP_IDLE;
+                s.provision_connect_accepted = false;
+                s.provision_sta_connected = false;
+                weather_cfg_restore_defaults();
+                s.status = WIFI_STAT_FAIL;
+                s.fails++;
+                s.ui_dirty = true;
+            }
+            else
+            {
+                s.provision_step = PROV_STEP_STA_JOIN;
+                s.provision_connect_accepted = false;
+            }
+        }
+        return;
+    }
+
+    switch (s.provision_step)
+    {
+        case PROV_STEP_AP_MODE:
+            (void)provision_send_at("AT+WFMODE=1", 3000U, PROV_STEP_AP_PROFILE);
+            break;
+        case PROV_STEP_AP_PROFILE:
+            (void)provision_send_at("AT+WFSAP=leeWethWifi,3,1,12345678,1,CH", 3000U, PROV_STEP_AP_REBOOT);
+            break;
+        case PROV_STEP_AP_REBOOT:
+            (void)provision_send_at("AT+RESTART", 5000U, PROV_STEP_AP_BOOT);
+            break;
+        case PROV_STEP_AP_BOOT:
+            if (at_engine_urc_take("+INIT:DONE,1"))
+            {
+                s.provision_step = PROV_STEP_AP_BOOT_DONE;
+                s.provision_deadline = now;
+            }
+            else if ((int32_t)(now - s.provision_deadline) >= 0)
+            {
+                printf("[prov] SoftAP boot URC missing; waiting for UART to recover\r\n");
+                s.provision_deadline = now + 1500U;
+            }
+            break;
+        case PROV_STEP_AP_BOOT_DONE:
+            (void)provision_send_at("AT+NWIP=1,192.168.1.100,255.255.255.0,192.168.1.100", 4000U, PROV_STEP_AP_IP);
+            break;
+        case PROV_STEP_AP_IP:
+            (void)provision_send_at("AT+NWDHS=0", 3000U, PROV_STEP_DHCP_STOP);
+            break;
+        case PROV_STEP_DHCP_STOP:
+            (void)provision_send_at("AT+NWDHR=192.168.1.2,192.168.1.11", 3000U, PROV_STEP_DHCP_RANGE);
+            break;
+        case PROV_STEP_DHCP_RANGE:
+            (void)provision_send_at("AT+NWDHS=1", 3000U, PROV_STEP_DHCP_START);
+            break;
+        case PROV_STEP_DHCP_START:
+            (void)provision_send_at("AT+TCPDATAMODE=1", 3000U, PROV_STEP_TCP_MODE);
+            break;
+        case PROV_STEP_TCP_MODE:
+            /* Renesas R01AN7287 SoftAP example starts its TCP listener after
+             * SoftAP/IP/DHCP configuration. RA provides the HTTP layer. */
+            (void)provision_send_at("AT+TRTS=8080", 5000U, PROV_STEP_TCP_LISTEN);
+            break;
+        case PROV_STEP_TCP_CLOSE:
+            if ((int32_t)(now - s.provision_deadline) >= 0)
+                (void)provision_send_at("AT+TRTRM=0", 3000U, PROV_STEP_STA_TEARDOWN);
+            break;
+        case PROV_STEP_TCP_LISTEN:
+            s.provision_step = PROV_STEP_SERVING;
+            s.status = WIFI_STAT_PROVISIONING;
+            s.ui_dirty = true;
+            printf("[prov] TCP listener acknowledged; open http://%s:%u/\r\n",
+                   PROVISIONING_PORTAL_IP, (unsigned)PROVISIONING_PORTAL_PORT);
+            break;
+        case PROV_STEP_SERVING:
+            /* UI was dirtied when listener startup completed. Do not redraw
+             * every cooperative-loop iteration while waiting for a client. */
+            break;
+        case PROV_STEP_STA_TEARDOWN:
+            if ((int32_t)(now - s.provision_deadline) >= 0)
+                (void)provision_send_at("AT+WFTAP", 3000U, PROV_STEP_STA_MODE);
+            break;
+        case PROV_STEP_STA_MODE:
+            if ((int32_t)(now - s.provision_deadline) >= 0)
+            {
+                (void)provision_send_at("AT+WFMODE=0", 3000U, PROV_STEP_STA_REBOOT);
+            }
+            break;
+        case PROV_STEP_TX_PENDING:
+            break;
+        case PROV_STEP_FAILED:
+            break;
+        case PROV_STEP_STA_REBOOT:
+            (void)provision_send_at("AT+RESTART", 5000U, PROV_STEP_STA_BOOT);
+            break;
+        case PROV_STEP_STA_BOOT:
+            if (at_engine_urc_take("+INIT:DONE,0"))
+            {
+                s.provision_step = PROV_STEP_STA_JOIN;
+                s.provision_connect_accepted = false;
+                s.wifi_try = 0U;
+                s.provision_deadline = now + PROV_STA_BOOT_DELAY_MS;
+            }
+            else if ((int32_t)(now - s.provision_deadline) >= 0)
+            {
+                printf("[prov] STA boot URC timeout\r\n");
+                s.provision_active = false;
+                s.provision_step = PROV_STEP_FAILED;
+                s.status = WIFI_STAT_FAIL;
+                s.fails++;
+                s.ui_dirty = true;
+            }
+            break;
+        case PROV_STEP_STA_JOIN:
+            break;
+        default:
+            break;
+    }
 }
 
 void weather_task_poll (void)
@@ -1158,7 +2125,8 @@ void weather_task_poll (void)
         {
             if (KEY_EVT_LONG == e)
             {
-                printf("[wx] key%u: long -> provisioning (stage4)\r\n", (unsigned)id);
+                printf("[wx] key%u: long -> request provisioning\r\n", (unsigned)id);
+                s.provision_requested = true;
                 s.ui_dirty = true;
             }
             else
@@ -1200,8 +2168,8 @@ void weather_task_poll (void)
                 break;
 
             case KEY_EVT_LONG:
-                /* 阶段4 接配网；当前仅打印，不改状态机 */
-                printf("[wx] key%u: long -> provisioning (stage4)\r\n", (unsigned)id);
+                printf("[wx] key%u: long -> request provisioning\r\n", (unsigned)id);
+                s.provision_requested = true;
                 s.ui_dirty = true;
                 break;
 
@@ -1210,8 +2178,11 @@ void weather_task_poll (void)
         }
     }
 
+    if (!s.provision_active && s.provision_requested)
+        provision_start();
     /* ---------- 2. 联网：URC 快速路径 + 超时阶梯 ---------- */
-    if ((WIFI_STAT_CONNECTING == s.status) || (WIFI_STAT_IDLE == s.status))
+    if (!s.provision_active && s.boot_sta_ready &&
+        ((WIFI_STAT_CONNECTING == s.status) || (WIFI_STAT_IDLE == s.status)))
     {
         char urc[AT_URC_LINE];
 
@@ -1328,11 +2299,11 @@ void weather_task_poll (void)
                      *   阶梯卡在第 3 级无限循环 AT+WFJAPA，既不换手段也不退���重爬。
                      *   现场证据：日志里 step=3 try=0 / try=1 交替出现且永不变。
                      *   现在计数完全交给 on_cmd_done 维护，这里不再碰 wifi_try。 */
-                    snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
-                             WEATHER_DEFAULT_SSID, WEATHER_DEFAULT_PWD);
-                    (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
-                    s.wifi_step = WIFI_STEP_WFJAPA;
-                    break;
+                     snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
+                              s.ssid, s.provision_password);
+                     (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
+                     s.wifi_step = WIFI_STEP_WFJAPA;
+                     break;
             }
         }
 
@@ -1341,6 +2312,19 @@ void weather_task_poll (void)
     /* ---------- 3. 引擎轮询（工程内唯一调用点, §4 单飞行） ---------- */
     {
         at_result_t r = at_engine_poll();
+
+        if ((s.cmd == CMD_PROV_RAW) && !wifi_uart_write_busy() &&
+            (wifi_uart_write_done_count() != s.provision_tx_done_mark))
+        {
+            s.cmd = CMD_NONE;
+            if (s.provision_step == PROV_STEP_TX_PENDING)
+            {
+                s.provision_step = s.provision_tx_next_step;
+                if (s.provision_config_pending &&
+                    (s.provision_step == PROV_STEP_TCP_CLOSE))
+                    s.provision_deadline = now + PROV_TCP_REPLY_DELAY_MS;
+            }
+        }
 
         if (AT_RES_PENDING != r)
         {
@@ -1371,15 +2355,21 @@ void weather_task_poll (void)
                     }
                 }
             }
-            else if (CMD_NONE != s.cmd)
+            else if ((CMD_NONE != s.cmd) && (CMD_PROV_RAW != s.cmd))
             {
                 on_cmd_done(r);
             }
         }
+
+        /* Advance provisioning only after dispatching the completion returned
+         * by this poll. Otherwise the previous command's latched result can be
+         * mistaken for the result of a newly submitted provisioning command. */
+        provision_poll(now);
+        boot_sta_poll(now);
     }
 
     /* ---------- 4. 命令调度（仅在引擎空闲时, 优先级从高到低） ---------- */
-    if (at_engine_idle() && !weather_http_busy())
+    if (!s.provision_active && s.boot_sta_ready && at_engine_idle() && !weather_http_busy())
     {
         /* 4a. Explicit queued refresh (key/API) takes precedence over periodic fetch. */
         if (s.refresh_pending)

@@ -27,6 +27,7 @@
         </peripheral>
         <peripheral name="SCI9.CM33" group="SCI" security="s"/>
         <peripheral name="SCI0.CM33" group="SCI" security="s"/>
+        <peripheral name="CTSU.CM33" security="s"/>
         <peripheral name="ICU.CM33">
             <slot name="IRQ0.CM33" secure="true"/>
             <slot name="IRQ1.CM33" secure="true"/>
@@ -36,6 +37,9 @@
             <slot name="IRQ5.CM33" secure="true"/>
             <slot name="IRQ6.CM33" secure="true"/>
             <slot name="IRQ7.CM33" secure="true"/>
+            <slot name="IRQ8.CM33" secure="true"/>
+            <slot name="IRQ9.CM33" secure="true"/>
+            <slot name="IRQ10.CM33" secure="true"/>
         </peripheral>
     </partition>
 </azone>

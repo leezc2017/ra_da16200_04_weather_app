@@ -26,6 +26,7 @@
 typedef struct {
     char    time_str[6];    /* "12:34" 或 "--:--" */
     char    city[16];       /* 当前固定配置为 "IP" */
+    char    ssid[33];       /* 当前生效/待连接的 Wi-Fi SSID */
     char    temp_str[8];    /* "26C" */
     char    wtext[16];      /* ASCII 天气文案 */
     char    humidity_str[8];
@@ -34,6 +35,7 @@ typedef struct {
     char    high_str[8];
     uint8_t icon;           /* weather_icon_t, 0xFF=无图标 */
     uint8_t offline;        /* 1=数据过期(掉线) */
+    uint8_t provisioning;    /* 0=AP 启动中, 1=AP 可用, 2=切回 STA, 3=启动 STA 收敛 */
 } ui_main_view_t;
 
 /* WiFi信息页视图数据 */

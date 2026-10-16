@@ -12,6 +12,7 @@
 #include "weather_text.h"
 #include "weather_ui.h"
 #include "weather_task.h"
+#include "provisioning_portal.h"
 #include "weather_http.h"
 #include "weather_parse.h"
 #include "key_scan.h"
@@ -48,6 +49,7 @@
 #define USB_TX_RING_SIZE  (4096U)     /* USB TX 环形缓冲: printf 入队, 主循环泵发, 不阻塞 */
 #define RX_RING_SIZE      (8192U)     /* WIFI RX 环形缓冲: 容 2KB+ 突发(WFSCAN 实测 ~1.9KB) */
 #define RX_LINE_MAX       (2048U)     /* TCP receive URC is hex encoded in safe mode */
+#define WIFI_BINARY_TX_MAX 1400U
 #define WIFI_TX_WAIT_MS   (200U)      /* 透传发送等待 TX 完成的兜底超时 */
 #define RX_PROCESS_BUDGET (256U)      /* 每轮最多处理字节数，防止 ISR 持续入流饿死主循环 */
 
@@ -369,9 +371,15 @@ static char wifi_rx_line[RX_LINE_MAX];
 static uint16_t wifi_rx_line_len = 0;
 /* Dedicated DMA-safe staging buffer for future ESC-S TCP frames. It is
  * deliberately separate from the 100-byte console/AT bridge buffer. */
-static uint8_t wifi_binary_tx[1400U];
+static uint8_t wifi_binary_tx[PROVISIONING_TX_MAX + 64U];
 static volatile uint8_t wifi_binary_tx_busy;
 static volatile uint32_t wifi_binary_tx_done;
+
+static void weather_tcp_urc_callback(const char *line, uint16_t length, void *context)
+{
+    (void)context;
+    weather_task_tcp_urc(line, length);
+}
 
 bool wifi_uart_write_async(const uint8_t *data, uint16_t length)
 {
@@ -400,7 +408,6 @@ uint32_t wifi_uart_write_done_count(void)
 {
     return wifi_binary_tx_done;
 }
-
 
 /* DA16200 WIFI 口回调: TX 完成计数 + 收到字符入环形缓冲
  *
@@ -651,6 +658,14 @@ static void rx_line_flush (void)
                 printf("[WXTEST] => parser is broken; the network side is irrelevant\r\n");
             }
         }
+        else if (0 == strcmp(rx_line, "PORTALTEST")) /* 本地门户解析/TCP framing 自检 */
+        {
+            char info[96];
+            if (provisioning_portal_selftest(info, sizeof(info)))
+                printf("[PORTALTEST] PASS %s\r\n", info);
+            else
+                printf("[PORTALTEST] FAIL %s\r\n", info);
+        }
         else if (0 == strcmp(rx_line, "AUTO"))      /* 启动阶段1自动诊断 */
         {
             at_probe_start();
@@ -784,10 +799,12 @@ void hal_entry(void)
     printf("Commands: AUTO = stage1 probe, AUTOB = boot-reconnect test, ABORT = stop\r\n");
     printf("Local: KEY = key pin levels now, HB = heartbeat snapshot now\r\n");
     printf("       WXTEST = parse the real seniverse body offline (no network)\r\n");
+    printf("       PORTALTEST = test provisioning HTTP parser/TCP frames offline\r\n");
 
     diag_fault_report();
 
     at_engine_init();
+    at_engine_urc_callback_set(weather_tcp_urc_callback, NULL);
 #if WEATHER_UI_SERIAL_SIM
     printf("[OLED] hardware init skipped; serial simulation enabled\r\n");
 #else

@@ -15,7 +15,7 @@
 
 #define AT_RESP_BUF_SIZE   4096U          /* 响应/payload 采集缓冲 */
 #define AT_CMD_MAX         180U           /* 单条命令上限(含自动补的 CRLF) */
-#define AT_LINE_MAX        2048U          /* +TRDTS hex 模式可含 HTTP 请求行/头/表单 */
+#define AT_LINE_MAX        4096U          /* +TRDTS hex: up to 2x HTTP request buffer */
 #define AT_URC_FIFO        4U             /* URC 消费队列深度 */
 #define AT_URC_LINE        96U
 #define AT_SEEN_MAX        8U             /* sticky "曾出现过" 记录条数 */
