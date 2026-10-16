@@ -15,6 +15,7 @@
 - **RA Data Flash 设置**：SSID、密码、城市保存在 8 KB Data Flash 的最后 384 字节（`0x08001E80–0x08001FFF`），双槽、CRC 和序号校验；启动只读，首次无记录用编译默认值而不擦写。配网获得 STA 连接后写入另一槽并读回校验。页面提交先显示“已收到/正在连接”，不是最终 Flash 保存成功回执。**编译已通过；Flash 实际写入、断电保留、双槽掉电恢复尚待板上验证。** 离线 `PORTALTEST` 可测 parser/framing，阶段4尚未全部验收。
 - **OLED 配网提示**：启动 SoftAP 时显示启动提示；AP/TCP listener ready 后显示热点名、密码和 `192.168.1.100:8080` 访问提示；POST 后切回 STA 时显示连接中的 SSID。Wi-Fi 状态页和连接/失败页显示当前生效 SSID。
 - **联网后链路监测**：CONNECTED 状态下每 5 秒空闲时查询一次 `AT+WFSTA`；同时消费 `+WFJAP:0` / `+WFSTA:0` 断线 URC。确认断线后清除旧 IP、切为 CONNECTING 并重启联网阶梯，LED1 从常亮转为连接闪烁。健康查询成功不置 OLED dirty；仅状态/内容变化时重绘，避免因轮询频繁刷新屏幕。
+- **本地凭据与发布安全**：复制 `src/weather_secrets.example.h` 为 `src/weather_secrets.h`，只在本地填入心知 API Key 和个人测试 STA SSID/密码。`weather_secrets.h` 已加入 `.gitignore`。固件若编译进 API Key，仍可能从 ELF/HEX 提取；公开发布应采用后端代理或专用可撤销 Key，并在发布前确认产物不含真实 Key。
 - **最近实机状态**：用户使用 Renesas Flash Programmer 烧写启动模式收敛版本后反馈“当前版本正常”；串口日志 `44.txt` 是该修复前的失败版本，显示开机直接进入 `WFSTA/WFCAP/WFJAPA` 且模块返回 `ERROR:-5`。新版本最新启动顺序仍建议留存串口日志，完整 Data Flash 掉电验收未完成。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。
@@ -348,19 +349,19 @@ ATF                    恢复出厂（清 NVRAM）
 
 #### 5.1.1 SoftAP 网页配网实测结果与验收步骤
 
-实测依据：用户提供的桌面日志 `33 - 副本.txt`（build `Oct 16 2026 13:14:21`）。日志确认手机 TCP 接入（`+TRCTS`）、GET `/`、GET `/favicon.ico`、POST `/cfg` 均到达 RA，HTTP POST 回复完成后执行 TCP close / SoftAP teardown / STA restart，最终收到 `+WFJAP:1,'<REDACTED_WIFI_SSID>',<host-ip>`。该日志由用户保存在桌面，没有复制进仓库。
+实测依据：用户提供的桌面日志（build `Oct 16 2026 13:14:21`）。日志确认手机 TCP 接入（`+TRCTS`）、GET `/`、GET `/favicon.ico`、POST `/cfg` 均到达 RA，HTTP POST 回复完成后执行 TCP close / SoftAP teardown / STA restart，最终收到 `+WFJAP:1,<SSID>,<IP>`。原始日志由用户保存在桌面，没有复制进仓库，避免纳入私人 Wi-Fi 信息。
 
 已通过的功能链路无需再从头排查；后续按需复测：
 
 1. 在 RA 控制台输入 `PORTALTEST`，应看到 `[PORTALTEST] PASS`。该命令只验证本地 HTTP 表单、Content-Length 和 TCP hex framing，不替代实机测试。
-2. 长按 P005 进入配网；手机连接 `leeWethWifi` / `12345678` 后，必须手动输入 **`http://192.168.1.100:8080/`**。端口区别已经实机确认：`http://192.168.1.100/`（TCP/80）显示 DA16200 的 LWIP 页面；`http://192.168.1.100:8080/`（TCP/8080）才是 RA 提供的配置页。手机 captive popup 可能探测 80 端口，不要用它判断 RA 页面。
+2. 长按 P005 进入配网；手机连接设备当前显示的 SoftAP SSID / 密码后，必须手动输入 **`http://192.168.1.100:8080/`**。端口区别已经实机确认：`http://192.168.1.100/`（TCP/80）显示 DA16200 的 LWIP 页面；`http://192.168.1.100:8080/`（TCP/8080）才是 RA 提供的配置页。手机 captive popup 可能探测 80 端口，不要用它判断 RA 页面。
 3. 如需复核链路，观察 `+TRCTS`、GET 对应的 `+TRDTS`，以及提交 `/cfg` 后的 STA 回连结果；出现 `+WFJAP:1` 表示 Wi-Fi 已连上。
 
 仍需完成的边界验收：错误密码、空字段、带空格/百分号编码的城市及编码的 `&`/`=` 密码；检查失败时不误报连接成功、状态机可重新进入。含逗号/单引号的 SSID/密码当前会拒绝（AT 参数为逗号分隔）。Data Flash 双槽代码已实现并编译，但实际写入、重启读回和断电保留尚未完成板测，因此阶段4尚未全部验收。不要手工执行 `ATF` / `AT+PROVSTART`，两者会清除 NVRAM 配置。
 
 #### SSID / 密码 / 城市的 RA Data Flash 持久化
 
-用户要求 Wi-Fi SSID、密码、城市**全部以 RA4M2 Data Flash 作为设置来源**；DA16200 NVRAM profile 只保留为模组连接机制，不作为 RA 设置的唯一副本。`configuration.xml` 已配置 `r_flash_hp` / `g_flash0`（Data Flash programming enabled，BGO disabled）；当前生成的 `ra_gen/hal_data.*` 和 FSP driver 已纳入工程并完成编译链接。RASC 重新生成时需检查 QE Touch/CTSU 配置，避免覆盖当前已验证触摸配置。
+用户要求 Wi-Fi SSID、密码、城市**全部以 RA4M2 Data Flash 作为设置来源**；DA16200 NVRAM profile 只保留为模组连接机制，不作为 RA 设置的唯一副本。`configuration.xml` 已配置 `r_flash_hp` / `g_flash0`（Data Flash programming enabled，BGO disabled）；当前生成的 `ra_gen/hal_data.*` 和 FSP driver 已纳入工程并完成编译链接。RASC 重新生成时需检查 QE Touch/CTSU 配置，避免覆盖当前已验证触摸配置。个人测试 SSID/密码及天气 API Key 放在被忽略的 `src/weather_secrets.h`；从 `src/weather_secrets.example.h` 复制后本地填写，不得提交。
 
 实现保留 Data Flash 末尾 `0x08001E80–0x08001FFF`（384 字节），分两个 192-byte slot；记录含 magic/version/sequence/SSID/password/city/CRC/commit。启动只读、无有效记录时使用编译默认设置但不擦写；配置提交时写非当前槽并读回校验，保留上一有效槽。仍需先确认该地址区无其他用途，再实机验证首次空白、写入/读回、二次更新和断电恢复；保存成功页面最终回执及串口密码脱敏也待完善。
 
@@ -411,7 +412,7 @@ ATF                    恢复出厂（清 NVRAM）
 
 ### 5.4 第一阶段固定配置与串口 OLED 模拟
 
-- `src/weather_cfg.h` 当前配置固定 WiFi SSID `<REDACTED_WIFI_SSID>`、密码 `<REDACTED_WIFI_PASSWORD>`，天气位置设为 `ip`，由心知服务按来源 IP 定位城市。
+- 开发者本地凭据放在忽略的 `src/weather_secrets.h`；模板为 `src/weather_secrets.example.h`。发布源码不包含个人 STA SSID/密码或真实天气 API Key。
 - `WEATHER_UI_SERIAL_SIM=1` 时，`hal_entry()` 跳过 `oled_port_init()`；`weather_ui.c` 将主页和 WiFi 信息页输出为 `[OLED] PAGE=...` 及 `L0`–`L3` 四行。每行最多 21 个 ASCII 字符，对应 128×32 屏使用 6 像素宽字体时的可视宽度。
 - 主页内容：IP 定位标记、实时天气/温度、实时湿度/风速、今日低温/高温和时间。实时数据来自 `now.json`，今日温度范围由其后的 `daily.json` 补充；daily 请求失败不影响实时天气显示。
 - WiFi 信息页显示 SSID、当前 IP 和连接状态；按键翻页行为与主状态机相同。

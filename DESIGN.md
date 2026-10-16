@@ -2,7 +2,9 @@
 
 > 状态：**RA4M2 + DA16200 天气主链路已完成板级验证；主栈扩展至 4 KB 后实测完成 SNTP、HTTP 200、JSON 解析和持续心跳**
 > 参考实现：GD32VW553 版 `..\..\..\GD32\workspace\GD32VW553\4.weather_app`
-> 基础工程：RA 版 `.`（USB↔WIFI 透传桥）
+> 基础工程：本仓库 RA4M2 + DA16200 工程（USB↔WIFI 透传桥）
+>
+> **密钥管理**：心知 API Key 和个人 STA 测试凭据只放在 git-ignored `src/weather_secrets.h`，模板为 `src/weather_secrets.example.h`。固件二进制仍可被逆向提取编译进去的 Key；对外发布时应采用服务器代理或单独可撤销的发布 Key。
 
 ## 1. 目标
 

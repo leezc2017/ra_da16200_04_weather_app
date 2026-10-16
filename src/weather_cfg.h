@@ -5,19 +5,33 @@
 #ifndef WEATHER_CFG_H
 #define WEATHER_CFG_H
 
+/* Personal credentials live in ignored src/weather_secrets.h. Start from the
+ * checked-in weather_secrets.example.h; never commit the filled-in file. */
+#if defined(__has_include)
+#if __has_include("weather_secrets.h")
+#include "weather_secrets.h"
+#endif
+#endif
+
+#ifndef WEATHER_DEFAULT_SSID
+#define WEATHER_DEFAULT_SSID     ""
+#endif
+#ifndef WEATHER_DEFAULT_PWD
+#define WEATHER_DEFAULT_PWD      ""
+#endif
+#ifndef WEATHER_API_KEY
+#define WEATHER_API_KEY          ""
+#endif
+#ifndef WEATHER_CITY
+#define WEATHER_CITY             "ip"
+#endif
+
 /* ===================== 1. WiFi 配置 ===================== */
-/* 留空 "" = 用 DA16200 NVRAM 中已保存的 profile 连接（AT+WFCAP）。
- * 填写后连接失败时回退 AT+WFJAPA=<ssid>,<pwd>；
- * AUTOB（开机自动重连测试）必须有 SSID 才会运行。
- * ⚠ 口令会随 [AT>] 回显明文出现在串口日志里，测试板可接受；量产前需改为
- *   不回显或从 DA16200 NVRAM 只存不读。 */
-#define WEATHER_DEFAULT_SSID     "<REDACTED_WIFI_SSID>"
-#define WEATHER_DEFAULT_PWD      "<REDACTED_WIFI_PASSWORD>"
+/* Personal development credentials, when needed, belong in the ignored
+ * src/weather_secrets.h (copy weather_secrets.example.h). Never commit them. */
 
 /* ===================== 2. 心知天气 API =================== */
-#define WEATHER_API_KEY          "<REDACTED_API_KEY>"
 /* 城市拼音, 留空 "" = 按IP自动定位。例: "beijing" */
-#define WEATHER_CITY             "ip"
 /* 返回语言(心知 language 参数, 官方 docs.seniverse.com/api/start/common.html):
  *   "zh-Hans" 简体中文(缺省) | "zh-Hant" 繁体 | "en" 英文 | "ja" 日语
  *   "de"/"fr"/"es"/"pt"/"hi"/"id"/"ru"/"th"/"ar"

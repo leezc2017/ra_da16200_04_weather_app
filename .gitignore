@@ -24,6 +24,9 @@ AUTOB*.txt
 1s.json
 *.bak
 
+# ---- Developer secrets (copy src/weather_secrets.example.h locally) ----
+src/weather_secrets.h
+
 # ---- 编辑器 ----
 .settings/
 .vscode/
