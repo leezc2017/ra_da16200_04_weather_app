@@ -315,6 +315,7 @@ OLED_Set_Pos(x, y):  0xb0 + y     // y 是【页号 0~3】，不是像素纵坐�
 
 ### 阶段4：SoftAP 网页配网与 RA Data Flash 设置持久化（核心链路有实机日志，完整验收待完成）
 - **启动模式收敛**：最新代码在 AT 自检后先执行 `AT+WFTAP` → `AT+WFMODE=0` → `AT+RESTART`，并等待 `+INIT:DONE,0` 才进入联网阶梯；若仍处于 AP 模式会有限重试。配网入口仍按请求切换到 SoftAP。用户最新 RFP 烧写后确认启动模式行为正常。
+- **联网状态监测**：CONNECTED 后以 5 秒间隔在 AT 空闲时发送 `AT+WFSTA`，并独立消费 `+WFJAP:0` / `+WFSTA:0` URC；断线时清空旧 IP、回 CONNECTING 并重启阶梯，LED1 随 status 变为闪烁。正常健康轮询不触发 OLED 重绘，只有状态或显示数据变化设置 `ui_dirty`。
 - **RA 设置存储实现**：使用 RA4M2 Data Flash 最后 384 字节 `0x08001E80–0x08001FFF`，分为两个 192 字节记录槽，含 magic/version/sequence/SSID/password/city/CRC/commit；启动只读，首次空白不自动擦写；新记录写入非当前槽并读回验证，保留上一有效槽。Data Flash 8 KB、64 字节擦除块、4 字节编程粒度。该地址区尚需确认未被其他固件功能占用，并待实机写入/断电恢复验证。
 - **核心网页配网链路已实机验证成功，无需修改 DA16200 SDK 固件。** DA16200 AT firmware 启动 SoftAP/DHCP/TCP server；RA4M2 接收 `+TRDTS`、解析 GET/POST 并用 raw `<ESC>S` 返回网页；POST 后关闭 TCP session、停 SoftAP、切 STA，`+WFJAP:1` 已在 `doc` 留存的最新板测日志中出现。
 - **端口实测结论：端口 80 显示 DA16200 自带 LWIP 页面；端口 8080 是本项目 RA-hosted 配网页。** 用户提供的 `33 - 副本.txt` 在 `AT+TRTS=8080` 后记录手机 peer `192.168.1.2` 的 `+TRCTS`、GET `/`、GET `/favicon.ico` 和 POST `/cfg`，之后 `WFJAPA` 返回 `+WFJAP:1`。手机需明确打开 `http://192.168.1.100:8080/`；不要使用 80 端口或依赖自动 captive popup。

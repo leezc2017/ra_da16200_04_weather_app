@@ -14,6 +14,7 @@
 - **启动模式与配网**：开机先下发 `AT+WFTAP`、`AT+WFMODE=0`、`AT+RESTART`，只有收到 `+INIT:DONE,0` 才启动 STA 联网阶梯；仍报告 AP 模式或启动超时会有限重试，不会在未确认 STA 时循环尝试联网。配网请求时按需切换 SoftAP。SoftAP + `TRTS=8080` 与 RA-hosted HTTP GET/POST、STA 回连已有实机日志；无需修改模组 SDK 固件。**端口区别：80 显示 DA16200 LWIP 页面；RA 配网页在 8080，手动访问 `http://192.168.1.100:8080/`。**
 - **RA Data Flash 设置**：SSID、密码、城市保存在 8 KB Data Flash 的最后 384 字节（`0x08001E80–0x08001FFF`），双槽、CRC 和序号校验；启动只读，首次无记录用编译默认值而不擦写。配网获得 STA 连接后写入另一槽并读回校验。页面提交先显示“已收到/正在连接”，不是最终 Flash 保存成功回执。**编译已通过；Flash 实际写入、断电保留、双槽掉电恢复尚待板上验证。** 离线 `PORTALTEST` 可测 parser/framing，阶段4尚未全部验收。
 - **OLED 配网提示**：启动 SoftAP 时显示启动提示；AP/TCP listener ready 后显示热点名、密码和 `192.168.1.100:8080` 访问提示；POST 后切回 STA 时显示连接中的 SSID。Wi-Fi 状态页和连接/失败页显示当前生效 SSID。
+- **联网后链路监测**：CONNECTED 状态下每 5 秒空闲时查询一次 `AT+WFSTA`；同时消费 `+WFJAP:0` / `+WFSTA:0` 断线 URC。确认断线后清除旧 IP、切为 CONNECTING 并重启联网阶梯，LED1 从常亮转为连接闪烁。健康查询成功不置 OLED dirty；仅状态/内容变化时重绘，避免因轮询频繁刷新屏幕。
 - **最近实机状态**：用户使用 Renesas Flash Programmer 烧写启动模式收敛版本后反馈“当前版本正常”；串口日志 `44.txt` 是该修复前的失败版本，显示开机直接进入 `WFSTA/WFCAP/WFJAPA` 且模块返回 `ERROR:-5`。新版本最新启动顺序仍建议留存串口日志，完整 Data Flash 掉电验收未完成。
 
 > **板卡来源**：RA4M2 开发板与 DA16200 WiFi 模块均为向 **RA 生态工作室**申请的测试板卡。

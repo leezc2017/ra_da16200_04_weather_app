@@ -116,6 +116,7 @@ typedef enum {
 #define PROV_AP_BOOT_DELAY_MS   4000U
 #define PROV_STA_BOOT_DELAY_MS  4000U
 #define PROV_TCP_REPLY_DELAY_MS 150U
+#define WIFI_HEALTH_POLL_MS     5000U
 
 #define BOOT_STA_STEP_WFTAP      0U
 #define BOOT_STA_STEP_WFMODE     1U
@@ -221,6 +222,7 @@ static struct {
     uint16_t ladder_sig;         /**< 已打印的 (step<<8|err)，用于日志限流 */
     uint8_t  ladder_nprint;      /**< 同一签名已重复打印次数 */
     uint8_t  wifi_try;            /**< 当前阶梯已尝试次数, 用于退避 */
+    uint32_t wifi_health_poll_ms;
 
     /* 心跳诊断(WEATHER_HB_DIAG_MS=0 时不打印) */
     uint32_t hb_t0;
@@ -265,6 +267,8 @@ static bool weather_cfg_load(void);
 static bool weather_cfg_save(const provisioning_config_t *config);
 static void weather_cfg_restore_defaults(void);
 static void boot_sta_poll(uint32_t now);
+static void wifi_link_lost(const char *reason);
+static void wifi_health_poll(uint32_t now);
 
 /* hal_entry.c 的诊断计数器(判断日志/数据是否被丢) */
 extern volatile uint32_t usb_tx_drop_cnt;
@@ -519,6 +523,7 @@ static void mark_connected (const char * how)
 {
     s.status   = WIFI_STAT_CONNECTED;
     s.ui_dirty = true;
+    s.wifi_health_poll_ms = at_engine_now_ms();
     s.timezone_set = false;
     s.sntp_done    = false;
     s.tz_fail      = 0U;      /* 每次重新连上都要清零, 否则沿用上一轮的失败计数 */
@@ -1234,12 +1239,31 @@ static void on_cmd_done (at_result_t r)
             break;
 
         case CMD_WFSTA:
-            /* +WFSTA:1 / +WFSTA:0 以 '+' 开头，会被 line_done() 收进 URC FIFO，
-             * 由 poll 第 2b 步统一消费并据此 mark_connected。这里只留失败日志。 */
+            /* Connection-attempt WFSTA URCs are consumed by the connecting
+             * branch. In CONNECTED state this command is a periodic health poll. */
             if (AT_RES_OK != r)
             {
                 printf("[wx] WFSTA query failed (err=%d)\r\n",
                        at_engine_resp()->err_code);
+            }
+            if (s.status == WIFI_STAT_CONNECTED)
+            {
+                char state[AT_URC_LINE];
+                if (at_engine_urc_get("+WFSTA:0", state, sizeof(state)))
+                {
+                    (void)at_engine_urc_take("+WFSTA:0");
+                    wifi_link_lost("WFSTA:0");
+                }
+                else if (at_engine_urc_get("+WFSTA:1", state, sizeof(state)))
+                {
+                    (void)at_engine_urc_take("+WFSTA:1");
+                    s.wifi_health_poll_ms = at_engine_now_ms();
+                }
+                else
+                {
+                    /* No response/URC: retry after one health interval. */
+                    s.wifi_health_poll_ms = at_engine_now_ms();
+                }
             }
             reconnect_if_needed();
             break;
@@ -1670,6 +1694,37 @@ static void boot_sta_poll(uint32_t now)
         default:
             break;
     }
+}
+
+static void wifi_link_lost(const char *reason)
+{
+    if (s.status != WIFI_STAT_CONNECTED) return;
+    printf("[wx] Wi-Fi link lost (%s); restart connection ladder\r\n", reason);
+    s.status = WIFI_STAT_CONNECTING;
+    s.ip[0] = '\0';
+    s.wifi_sta_ok = false;
+    s.wifi_step = WIFI_STEP_NWIP_QUERY;
+    s.wifi_try = 0U;
+    s.ladder_sig = 0xFFFFU;
+    s.connect_t0 = at_engine_now_ms();
+    s.timezone_set = false;
+    s.sntp_done = false;
+    s.time_check_pending = false;
+    s.ui_dirty = true;
+}
+
+static void wifi_health_poll(uint32_t now)
+{
+    if ((s.status != WIFI_STAT_CONNECTED) || s.provision_active ||
+        (CMD_NONE != s.cmd) || !at_engine_idle() ||
+        weather_http_busy() ||
+        ((now - s.wifi_health_poll_ms) < WIFI_HEALTH_POLL_MS))
+        return;
+
+    /* Advance the deadline before submitting so a busy/rejected attempt cannot
+     * spin every main-loop tick. Command completion updates/retries the timer. */
+    s.wifi_health_poll_ms = now;
+    (void)at_send_owned("AT+WFSTA", 2500U, CMD_WFSTA);
 }
 
 static void provision_http_service(void)
@@ -2178,6 +2233,24 @@ void weather_task_poll (void)
         }
     }
 
+    /* Consume unsolicited disconnect events even after the state is CONNECTED.
+     * They update status once; the OLED only redraws because link-loss marks it dirty. */
+    if (s.boot_sta_ready && !s.provision_active &&
+        (s.status == WIFI_STAT_CONNECTED))
+    {
+        char link_event[AT_URC_LINE];
+        if (at_engine_urc_get("+WFJAP:0", link_event, sizeof(link_event)))
+        {
+            (void)at_engine_urc_take("+WFJAP:0");
+            wifi_link_lost("WFJAP:0 URC");
+        }
+        else if (at_engine_urc_get("+WFSTA:0", link_event, sizeof(link_event)))
+        {
+            (void)at_engine_urc_take("+WFSTA:0");
+            wifi_link_lost("WFSTA:0 URC");
+        }
+    }
+
     if (!s.provision_active && s.provision_requested)
         provision_start();
     /* ---------- 2. 联网：URC 快速路径 + 超时阶梯 ---------- */
@@ -2367,6 +2440,8 @@ void weather_task_poll (void)
         provision_poll(now);
         boot_sta_poll(now);
     }
+
+    wifi_health_poll(now);
 
     /* ---------- 4. 命令调度（仅在引擎空闲时, 优先级从高到低） ---------- */
     if (!s.provision_active && s.boot_sta_ready && at_engine_idle() && !weather_http_busy())
