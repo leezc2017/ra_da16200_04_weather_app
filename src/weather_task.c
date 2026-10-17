@@ -1,26 +1,17 @@
 /**
  * @file  weather_task.c
- * @brief 天气主状态机：联网 / 对时 / 天气轮询 / OLED 刷新 / 按键
+ * @brief 天气主状态机：联�?/ 对时 / 天气轮询 / OLED 刷新 / 按键
  *
- * 移植自 GD32VW553 版 4.weather_app/src/weather_task.c。
- *
- * ============================ 与 GD32 版的差异 ============================
- * 1. 调度：FreeRTOS 任务 -> 裸机 10ms tick（weather_task_poll）
- * 2. 联网：wifi_prov_start() 阻塞 -> **被动等 +WFJAP URC**（实测上电自发）
+ * 移植�?GD32VW553 �?4.weather_app/src/weather_task.c�? *
+ * ============================ �?GD32 版的差异 ============================
+ * 1. 调度：FreeRTOS 任务 -> 裸机 10ms tick（weather_task_poll�? * 2. 联网：wifi_prov_start() 阻塞 -> **被动�?+WFJAP URC**（实测上电自发）
  * 3. SNTP：lwip sntp_start_once() -> AT+NWSNTP=1,<server>,86400
- * 4. 时间：内部 s_epoch_base + gmtime() -> **每分钟查一次 AT+TIME**
- *    （RA 不用内部 RTC，DA16200 持有 RTC；实测 +TIME:2026-10-03,11:30:51）
- * 5. HTTP：weather_http_get() -> AT+NWHTC PAYLOAD 模式
- * 6. 按键：GD32 GPIO -> R_IOPORT_PinRead，事件改用 FIFO（§8.1 根因1）
- *
- * ============================ 引擎轮询权（关键设计约束） ============================
- * DESIGN §4 要求"同一时刻只允许一条命令在途"。因此 at_engine_poll() 在整个
- * 工程里**只有一个调用点**，就是本文件的 weather_task_poll()。
- * weather_http 不自己轮询引擎，而是靠 weather_http_on_engine_done() 被动接收结果。
- * 否则两处轮询同一引擎会互相抢状态机，表现为"命令随机丢失"。
- *
- * 命令归属(cmd_owner_t)决定引擎完成后把结果发给谁。
- */
+ * 4. 时间：内�?s_epoch_base + gmtime() -> **每分钟查一�?AT+TIME**
+ *    （RA 不用内部 RTC，DA16200 持有 RTC；实�?+TIME:2026-10-03,11:30:51�? * 5. HTTP：weather_http_get() -> AT+NWHTC PAYLOAD 模式
+ * 6. 按键：GD32 GPIO -> R_IOPORT_PinRead，事件改�?FIFO（�?.1 根因1�? *
+ * ============================ 引擎轮询权（关键设计约束�?============================
+ * DESIGN §4 要求"同一时刻只允许一条命令在�?。因�?at_engine_poll() 在整�? * 工程�?*只有一个调用点**，就是本文件�?weather_task_poll()�? * weather_http 不自己轮询引擎，而是�?weather_http_on_engine_done() 被动接收结果�? * 否则两处轮询同一引擎会互相抢状态机，表现为"命令随机丢失"�? *
+ * 命令归属(cmd_owner_t)决定引擎完成后把结果发给谁�? */
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
@@ -39,22 +30,22 @@
 #include "provisioning_portal.h"
 #include "hal_data.h"
 
-/* daily 数据缺失时的高频重试（不再等满一个 refresh 周期） */
-#define WEATHER_DAILY_RETRY        3U      /* 每轮最多补抓次数 */
+/* daily 数据缺失时的高频重试（不再等满一�?refresh 周期�?*/
+#define WEATHER_DAILY_RETRY        3U      /* 每轮最多补抓次�?*/
 #define WEATHER_DAILY_RETRY_GAP_MS 30000U  /* 两次补抓间隔 */
 
 /** 命令归属：决定引擎结果交给谁处理 */
 typedef enum {
-    CMD_NONE = 0,      /**< 无命令在途 */
+    CMD_NONE = 0,      /**< 无命令在�?*/
     CMD_AT,            /**< AT 自检: 启动时先验证模块响应 */
     CMD_BOOT_STA,      /**< Force DA16200 into STA mode during RA boot */
     CMD_TIME,          /**< AT+TIME */
     CMD_TZSET,         /**< AT+TZONE=<sec> */
     CMD_SNTP,          /**< AT+NWSNTP=... */
-    CMD_NWIP,          /**< AT+NWIP=?: 读接口 IP（只用于取地址，不用于判断连接） */
-    CMD_WFSTA,         /**< AT+WFSTA: 权威连接状态（手册 L1149：+WFSTA:1 已关联 / 0 未关联） */
-    CMD_WFCAP,         /**< AT+WFCAP: 用 NVRAM 已存 profile 连接 */
-    CMD_WFJAPA,        /**< AT+WFJAPA: 连接并写入 NVRAM */
+    CMD_NWIP,          /**< AT+NWIP=?: 读接�?IP（只用于取地址，不用于判断连接�?*/
+    CMD_WFSTA,         /**< AT+WFSTA: 权威连接状态（手册 L1149�?WFSTA:1 已关�?/ 0 未关联） */
+    CMD_WFCAP,         /**< AT+WFCAP: �?NVRAM 已存 profile 连接 */
+    CMD_WFJAPA,        /**< AT+WFJAPA: 连接并写�?NVRAM */
     CMD_PROV_AT,       /**< Provisioning control AT command */
     CMD_PROV_RAW,      /**< ESC-S TCP reply is in flight */
     CMD_HTTP_NOW,      /**< AT+NWHTC now.json */
@@ -62,32 +53,18 @@ typedef enum {
 } cmd_owner_t;
 
 /**
- * @brief 联网手段阶梯（2026-10-03 实测 + 修正）
- *
- * ⚠ 修正过一次错误结论。初版以为"模块不自连，因为 ERROR:-7 = NVRAM 无 profile"，
- *   但用户指出**之前确实拉到了天气**，且那次 `+WFJAP:1` 是开机自发出现的 ——
- *   说明 profile 是有的、模块是会自连的。
- *
- * 真实情况：`+WFJAP:1` 是**上电一次性 URC**。如果 DA16200 模块没跟着复位
- * （只复位了 RA 板子），它在 RA 起来之前就已经把这条 URC 发完了，
- * RA 永远等不到。而此时模块其实**已经连着 AP**，只是 RA 不知道。
- * `AT+WFCAP` 在"已连接"状态下报错，也容易被误读成"无 profile"。
- *
- * 所以阶梯的第一原则是**主动查询**，而不是被动等一次性 URC：
- *   0. NWIP_QUERY —— AT+NWIP=? 直接问"你现在的 IP 是多少"。
- *                   模块已连上就直接拿到 IP 收工，这是最快的路径，
- *                   也免疫 URC 错过的问题。回 ERROR/-1 表示没连上，再往下走。
- *   1. WAIT_URC   —— 短等 +WFJAP:1：兼容"RA 先起、模块后起"的冷启动顺序。
- *   2. WFCAP      —— 让模块用 NVRAM 里已存的 profile 连。
- *   3. WFJAPA     —— 显式带 SSID/PWD 连（并写 NVRAM），最兜底的手段。
- *
- * 阶段2 直接用 weather_cfg.h 里硬编码的 SSID/PWD 走第 3 步；
- * 阶段4 配网完成后 profile 已存，第 0/2 步就会命中。
- */
-#define WIFI_STEP_NWIP_QUERY 0 /**< AT+NWIP=? 主动查 IP（最快路径） */
+ * @brief 联网手段阶梯�?026-10-03 实测 + 修正�? *
+ * �?修正过一次错误结论。初版以�?模块不自连，因为 ERROR:-7 = NVRAM �?profile"�? *   但用户指�?*之前确实拉到了天�?*，且那次 `+WFJAP:1` 是开机自发出现的 —�? *   说明 profile 是有的、模块是会自连的�? *
+ * 真实情况：`+WFJAP:1` �?*上电一次�?URC**。如�?DA16200 模块没跟着复位
+ * （只复位�?RA 板子），它在 RA 起来之前就已经把这条 URC 发完了，
+ * RA 永远等不到。而此时模块其�?*已经连着 AP**，只�?RA 不知道�? * `AT+WFCAP` �?已连�?状态下报错，也容易被误读成"�?profile"�? *
+ * 所以阶梯的第一原则�?*主动查询**，而不是被动等一次�?URC�? *   0. NWIP_QUERY —�?AT+NWIP=? 直接�?你现在的 IP 是多�?�? *                   模块已连上就直接拿到 IP 收工，这是最快的路径�? *                   也免�?URC 错过的问题。回 ERROR/-1 表示没连上，再往下走�? *   1. WAIT_URC   —�?短等 +WFJAP:1：兼�?RA 先起、模块后�?的冷启动顺序�? *   2. WFCAP      —�?让模块用 NVRAM 里已存的 profile 连�? *   3. WFJAPA     —�?显式�?SSID/PWD 连（并写 NVRAM），最兜底的手段�? *
+ * 阶段2 直接�?weather_cfg.h 里硬编码�?SSID/PWD 走第 3 步；
+ * 阶段4 配网完成�?profile 已存，第 0/2 步就会命中�? */
+#define WIFI_STEP_NWIP_QUERY 0 /**< AT+NWIP=? 主动�?IP（最快路径） */
 #define WIFI_STEP_WAIT_URC   1 /**< 短等 +WFJAP:1 URC */
-#define WIFI_STEP_WFCAP      2 /**< 用 NVRAM profile 连 */
-#define WIFI_STEP_WFJAPA     3 /**< 显式带 SSID/PWD 连接并写 NVRAM */
+#define WIFI_STEP_WFCAP      2 /**< �?NVRAM profile �?*/
+#define WIFI_STEP_WFJAPA     3 /**< 显式�?SSID/PWD 连接并写 NVRAM */
 
 /** 最高阶梯连续失败这么多次后, 退回到第一级重跑整条链 */
 #define WIFI_WFJAPA_MAX_TRY  3U
@@ -161,30 +138,22 @@ _Static_assert((WEATHER_CFG_SLOT_SIZE % BSP_FEATURE_FLASH_HP_DF_WRITE_SIZE) == 0
 
 
 /**
- * @brief 同一个阶梯状态最多隔多少次重试再打一次日志
- *
- * 阶梯每 WEATHER_CONNECT_TIMEOUT_MS(8s) 跳一级，无限重试时会刷出成百上千行
- * 几乎相同的文本。实测一次失败的抓取里，光 "WFJAPA failed" 就占了 20+ 行，
- * 把真正有意义的状态迁移埋掉了。同签名只打第一遍，之后每 N 次打一行"还在原地"。
- */
+ * @brief 同一个阶梯状态最多隔多少次重试再打一次日�? *
+ * 阶梯�?WEATHER_CONNECT_TIMEOUT_MS(8s) 跳一级，无限重试时会刷出成百上千�? * 几乎相同的文本。实测一次失败的抓取里，�?"WFJAPA failed" 就占�?20+ 行，
+ * 把真正有意义的状态迁移埋掉了。同签名只打第一遍，之后�?N 次打一�?还在原地"�? */
 #define LADDER_LOG_REPEAT    10U
 
 /**
  * @brief AT+TZONE 最多重试几次后放弃对时
  *
- * ⚠ 这条是为了打破"初始化三段式互相阻塞"而加的（2026-10-12）。
- *
- * 原调度是一条严格串行链：
- *   TZONE 成功 -> SNTP 成功 -> 才发天气请求
+ * �?这条是为了打�?初始化三段式互相阻塞"而加的（2026-10-12）�? *
+ * 原调度是一条严格串行链�? *   TZONE 成功 -> SNTP 成功 -> 才发天气请求
  * 任一段失败都会把后续全部堵死。TZONE 只有 2500ms 超时，模块冷启动
- * 响应慢时很容易超时，于是天气永远取不到。
- *
- * 时区/对时只是显示层的锦上添花，不该阻塞天气数据。所以失败够多次就
- * 直接把 timezone_set 置 true 当作"已处理"，让链路继续往下走。
- */
+ * 响应慢时很容易超时，于是天气永远取不到�? *
+ * 时区/对时只是显示层的锦上添花，不该阻塞天气数据。所以失败够多次�? * 直接�?timezone_set �?true 当作"已处�?，让链路继续往下走�? */
 #define TZ_MAX_FAIL          3U
 
-/* ===================== 状态 ===================== */
+/* ===================== 状�?===================== */
 
 static struct {
     /* 联网 */
@@ -192,15 +161,15 @@ static struct {
     uint32_t      connect_t0;
 
     /* 对时 */
-    uint32_t time_poll_ms;      /**< 上次查 AT+TIME 的时刻 */
+    uint32_t time_poll_ms;      /**< 上次�?AT+TIME 的时�?*/
     bool    time_valid;         /**< 已拿到过有效时间 */
-    bool    timezone_set;       /**< AT+TZONE 已成功下发 */
-    bool    sntp_done;          /**< AT+NWSNTP 已投递 */
-    bool    time_check_pending;  /**< SNTP 后延时验证 AT+TIME */
+    bool    timezone_set;       /**< AT+TZONE 已成功下�?*/
+    bool    sntp_done;          /**< AT+NWSNTP 已投�?*/
+    bool    time_check_pending;  /**< SNTP 后延时验�?AT+TIME */
     uint32_t time_check_due_ms;  /**< SNTP 后验证时间的截止时刻 */
-    bool    refresh_pending;     /**< 手动刷新请求，网络不可用时保留 */
-    uint8_t tz_fail;            /**< TZONE 连续失败次数, 到 TZ_MAX_FAIL 就不再堵链路 */
-    char    time_str[6];        /**< 最近一次 AT+TIME 的 "HH:MM" */
+    bool    refresh_pending;     /**< 手动刷新请求，网络不可用时保�?*/
+    uint8_t tz_fail;            /**< TZONE 连续失败次数, �?TZ_MAX_FAIL 就不再堵链路 */
+    char    time_str[6];        /**< 最近一�?AT+TIME �?"HH:MM" */
 
     /* 天气 */
     weather_data_t wx;
@@ -224,19 +193,19 @@ static struct {
     /* 命令归属 */
     cmd_owner_t cmd;
 
-    /* 联网阶梯(见 WIFI_STEP_* 注释) */
+    /* 联网阶梯(�?WIFI_STEP_* 注释) */
     uint8_t  wifi_step;
-    uint8_t  wifi_sta_ok;        /**< AT+WFSTA 最近一次回答: 1=已关联 0=未关联 */
-    uint16_t ladder_sig;         /**< 已打印的 (step<<8|err)，用于日志限流 */
-    uint8_t  ladder_nprint;      /**< 同一签名已重复打印次数 */
-    uint8_t  wifi_try;            /**< 当前阶梯已尝试次数, 用于退避 */
+    uint8_t  wifi_sta_ok;        /**< AT+WFSTA 最近一次回�? 1=已关�?0=未关�?*/
+    uint16_t ladder_sig;         /**< 已打印的 (step<<8|err)，用于日志限�?*/
+    uint8_t  ladder_nprint;      /**< 同一签名已重复打印次�?*/
+    uint8_t  wifi_try;            /**< 当前阶梯已尝试次�? 用于退�?*/
     uint32_t wifi_health_poll_ms;
 
     /* 心跳诊断(WEATHER_HB_DIAG_MS=0 时不打印) */
     uint32_t hb_t0;
-    uint32_t hb_fast;      /**< fetch 在途时的 1s 心跳时基 */
-    uint32_t fetch_t0;     /**< 本次 fetch 发起时刻, 供 OLED 显示已等秒数 */
-    uint32_t fetch_sec;    /**< 上次刷新的已等秒数, 变了就置 ui_dirty 重绘 */
+    uint32_t hb_fast;      /**< fetch 在途时�?1s 心跳时基 */
+    uint32_t fetch_t0;     /**< 本次 fetch 发起时刻, �?OLED 显示已等秒数 */
+    uint32_t fetch_sec;    /**< 上次刷新的已等秒�? 变了就置 ui_dirty 重绘 */
     bool boot_sta_ready;
     uint8_t boot_sta_step;
     uint8_t boot_sta_command_step;
@@ -291,39 +260,34 @@ extern volatile uint32_t wifi_tx_done_cnt;
 /**
  * @brief 低频心跳：确认主循环还活着、且引擎在收数据
  *
- * 定位"程序不动了"时非常有用：如果本行在刷新而 [WIFI] 不刷新，
- * 说明是 WIFI 口没数据；连本行都不刷新，才是主循环真的卡住。
- */
+ * 定位"程序不动�?时非常有用：如果本行在刷新�?[WIFI] 不刷新，
+ * 说明�?WIFI 口没数据；连本行都不刷新，才是主循环真的卡住�? */
 static void hb_print (uint32_t now);
 
 /**
- * @brief 最近一次天气抓取的结论（缓存，等价于 [WX-RESULT] 那一行）
+ * @brief 最近一次天气抓取的结论（缓存，等价�?[WX-RESULT] 那一行）
  *
  * 为什么缓存（2026-10-04）：
- *   [WX-RESULT] 是一次性打印，落在串口窗口外就再也拿不到，而心跳要等
- *   5s、fetch 在途时才有 1s 心跳，都不可靠。缓存之后**无论窗口多小**，
- *   心跳行里必然带着结论；OLED 也能直接显示，**完全不需要看日志**。
- *
- * 这样就不再需要"等多久再抓日志"这种提问 —— 结果是被动的、随时可读的。
- */
+ *   [WX-RESULT] 是一次性打印，落在串口窗口外就再也拿不到，而心跳要�? *   5s、fetch 在途时才有 1s 心跳，都不可靠。缓存之�?*无论窗口多小**�? *   心跳行里必然带着结论；OLED 也能直接显示�?*完全不需要看日志**�? *
+ * 这样就不再需�?等多久再抓日�?这种提问 —�?结果是被动的、随时可读的�? */
 typedef enum {
     WXR_NONE = 0,      /**< 还没拉过 */
     WXR_OK,            /**< 解析成功 */
     WXR_HTTP_ERR,      /**< HTTP 状态非 200 */
-    WXR_PARSE_ERR,     /**< 拿到 body 但 cJSON 解析失败 */
+    WXR_PARSE_ERR,     /**< 拿到 body �?cJSON 解析失败 */
     WXR_TRANSPORT_ERR  /**< 引擎超时/错误 */
 } wx_res_t;
 
 static struct {
     wx_res_t kind;
-    int      http;                 /**< HTTP 状态码, -1 = 未取到 */
-    int      nw;                   /**< +NWHTCSTATUS 的 n, -1 = 未收到 */
+    int      http;                 /**< HTTP 状态码, -1 = 未取�?*/
+    int      nw;                   /**< +NWHTCSTATUS �?n, -1 = 未收�?*/
     uint16_t body_len;
     int      temperature;
     uint8_t  code;                 /**< 心知天气 code */
-    char     text[24];             /**< 英文文案(ASCII, 上屏用) */
+    char     text[24];             /**< 英文文案(ASCII, 上屏�? */
     char     api_text[40];         /**< API 原文(UTF-8, 仅供串口查看) */
-    uint32_t at_ms;                /**< 结论产生的引擎时刻 */
+    uint32_t at_ms;                /**< 结论产生的引擎时�?*/
 } s_wxr;
 
 const char * weather_task_last_result (void)
@@ -349,7 +313,7 @@ int weather_task_last_temp (void)
     return s_wxr.temperature;
 }
 
-/** 供 OLED 显示用：把最近结论拼成一行短文本（ASCII, 128x32 放得下） */
+/** �?OLED 显示用：把最近结论拼成一行短文本（ASCII, 128x32 放得下） */
 void weather_task_result_line (char * buf, uint16_t size)
 {
     snprintf(buf, size, "%s %dC", weather_task_last_result(), s_wxr.temperature);
@@ -402,17 +366,12 @@ static const char * cmd_st_name (cmd_owner_t c)
 }
 
 /**
- * @brief 状态总表：把所有状态位打成**一行**
+ * @brief 状态总表：把所有状态位打成**一�?*
  *
- * 存在的理由（2026-10-04）：之前每一层各自打印一小段，导致"当前到底什么状态"
- * 必须靠人把散落各处的行拼起来看，而其中关键几行又经常落在串口窗口之外 ——
- * 于是变成反复让用户贴日志、掐时间等。这里改成一行给全，**看一行就够**。
- *
+ * 存在的理由（2026-10-04）：之前每一层各自打印一小段，导�?当前到底什么状�?
+ * 必须靠人把散落各处的行拼起来看，而其中关键几行又经常落在串口窗口之外 —�? * 于是变成反复让用户贴日志、掐时间等。这里改成一行给全，**看一行就�?*�? *
  * 只在两个时机调用，都是低频：
- *   - 开机(warmup)          : 全部初始状态
- *   - 每次界面刷新(redraw)  : 每次状态迁移（联网成功/抓取完成/按键翻页）
- * 加上 5s/1s 心跳作为"没有变化时"的兜底。三者合起来覆盖全部时机。
- */
+ *   - 开�?warmup)          : 全部初始状�? *   - 每次界面刷新(redraw)  : 每次状态迁移（联网成功/抓取完成/按键翻页�? * 加上 5s/1s 心跳作为"没有变化�?的兜底。三者合起来覆盖全部时机�? */
 static void dump_state (const char * tag)
 {
     at_engine_diag_t d;
@@ -444,10 +403,8 @@ static void dump_state (const char * tag)
            (unsigned)d.urc_cnt, (unsigned)d.seen_cnt,
            (unsigned long)wifi_rx_drop_cnt, (unsigned long)usb_tx_drop_cnt,
            (unsigned)k1, (unsigned)k2,
-           /* fsec= 本次 fetch 已等秒数(未在途时为 0xFFFFFFFF, 打印成 up 后难以
-            * 辨识, 所以在途时才显示有效值)。两个时间字段改名为 clk / up:
-            * 之前都叫 t=, 我自己把 up 读成了"距离某事件的时间", 导致把
-            * "[hb] 1s"误当成"请求发出很久了"。名字必须能自解释。 */
+           /* fsec= 本次 fetch 已等秒数(未在途时�?0xFFFFFFFF, 打印�?up 后难�?            * 辨识, 所以在途时才显示有效�?。两个时间字段改名为 clk / up:
+            * 之前都叫 t=, 我自己把 up 读成�?距离某事件的时间", 导致�?            * "[hb] 1s"误当�?请求发出很久�?。名字必须能自解释�?*/
            weather_http_busy() ?
                (unsigned)((at_engine_now_ms() - s.fetch_t0) / 1000UL) : 0U,
            (unsigned long)(at_engine_now_ms() / 1000UL));
@@ -461,22 +418,18 @@ static void hb_print (uint32_t now)
 
     key_raw_levels(&k1, &k2);
     at_engine_diag(&d);
-    /* ⚠ link= 这一段是"链路初始化进度"，排查"为什么没去拉天气"时最有用：
-     *   tz/sntp/wx 三个 bit 依次点亮，cmd 是当前在途命令归属。
-     *   三个 bit 全 0 且 cmd=AT(1)  -> 卡在开机自检
-     *   tz=0 且 cmd=0              -> 卡在等 TZONE 发出（引擎不空闲）
-     *   tz=1 sntp=0                -> 卡在等 SNTP
-     *   tz=1 sntp=1 wx=0           -> 正在拉第一次天气
-     *   wx=1                       -> 天气已就位，之后进入 15min 定时刷新
-     * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）。 */
+    /* �?link= 这一段是"链路初始化进�?，排�?为什么没去拉天气"时最有用�?     *   tz/sntp/wx 三个 bit 依次点亮，cmd 是当前在途命令归属�?     *   三个 bit �?0 �?cmd=AT(1)  -> 卡在开机自检
+     *   tz=0 �?cmd=0              -> 卡在�?TZONE 发出（引擎不空闲�?     *   tz=1 sntp=0                -> 卡在�?SNTP
+     *   tz=1 sntp=1 wx=0           -> 正在拉第一次天�?     *   wx=1                       -> 天气已就位，之后进入 15min 定时刷新
+     * 只加在这一行里，不新增任何打印行（§3.4.1 诊断必须低频）�?*/
      printf("[hb] up=%lus fsec=%us eng=%u mode=%u urc=%u/%u rx=%lu ln=%lu plus=%lu "
             "wifi_rx=%lu drop=%lu usb_drop=%lu st=%d wx=%s %dC "
             "kraw=%u%u res=%s/%d rq=%u loop=%lu stage=%u wrx=%lu urx=%lu wtx=%lu "
             "link[tz=%u sntp=%u wx=%u cmd=%u step=%u try=%u http=%u]\r\n",
            (unsigned long)(now / 1000UL),
-           /* fsec= 本次 fetch 已等秒数(不在途时为 0)。2026-10-04 加:
-            * 之前这行只有一个含糊的秒数, 我误把它读成"请求已发出多久",
-            * 于是把"请求刚发出 1 秒"当成"抓取卡住了"。 */
+           /* fsec= 本次 fetch 已等秒数(不在途时�?0)�?026-10-04 �?
+            * 之前这行只有一个含糊的秒数, 我误把它读成"请求已发出多�?,
+            * 于是�?请求刚发�?1 �?当成"抓取卡住�?�?*/
            weather_http_busy() ? (unsigned)((now - s.fetch_t0) / 1000UL) : 0U,
            d.state, d.mode, d.urc_cnt, d.seen_cnt,
            (unsigned long)d.rx_bytes, (unsigned long)d.lines,
@@ -504,16 +457,12 @@ static void hb_print (uint32_t now)
 /* ===================== 内部工具 ===================== */
 
 /**
- * @brief 联网类命令完成后回到"等待"状态
- *
- * ⚠ 关键：只在**还没连上**时才回退状态。
- *
- * poll 的执行顺序是「先第 2 步取 URC → 再第 3 步收命令结果」，所以可能
- * 在同一次 poll 里先把状态置成 CONNECTED（第 2 步拿到 +NWIP / +WFJAP），
- * 紧接着第 3 步的 on_cmd_done() 才跑。若这里无条件写
- * `status = WIFI_STAT_CONNECTING`，就会把刚刚确认的 CONNECTED 打回去，
- * 阶梯重新开始 → 已经连着还在反复发 WFCAP/WFJAPA（2026-10-03 实测复现）。
- */
+ * @brief 联网类命令完成后回到"等待"状�? *
+ * �?关键：只�?*还没连上**时才回退状态�? *
+ * poll 的执行顺序是「先�?2 步取 URC �?再第 3 步收命令结果」，所以可�? * 在同一�?poll 里先把状态置�?CONNECTED（第 2 步拿�?+NWIP / +WFJAP），
+ * 紧接着�?3 步的 on_cmd_done() 才跑。若这里无条件写
+ * `status = WIFI_STAT_CONNECTING`，就会把刚刚确认�?CONNECTED 打回去，
+ * 阶梯重新开�?�?已经连着还在反复�?WFCAP/WFJAPA�?026-10-03 实测复现）�? */
 static void reconnect_if_needed (void)
 {
     if (WIFI_STAT_CONNECTED != s.status)
@@ -523,8 +472,7 @@ static void reconnect_if_needed (void)
 }
 
 /**
- * @brief 把整个连接流程标记为已连上
- *
+ * @brief 把整个连接流程标记为已连�? *
  * @param how 来源描述，仅用于日志
  */
 static void mark_connected (const char * how)
@@ -542,15 +490,11 @@ static void mark_connected (const char * how)
 /**
  * @brief 从一行文本里取出 IP 字段
  *
- * 兼容两种实测格式：
- *   +WFJAP:1,'CMCC-xxxx',192.168.1.2   —— IP 在**最后**一个逗号后（SSID 带引号）
- *   +NWIP:0,192.168.1.2,255.255.255.0,192.168.1.1 —— IP 在**第 2** 个字段
- *
- * 做法：跳过前导 '+'，按逗号切成字段；先找第一个"看起来像 IPv4"的字段，
- * 找不到再退回"最后一个逗号后"。这样两种格式都不用分别写解析器。
- *
- * @param line 输入行（不含 CRLF）
- * @param out  输出缓冲
+ * 兼容两种实测格式�? *   +WFJAP:1,'CMCC-xxxx',192.168.1.2   —�?IP �?*最�?*一个逗号后（SSID 带引号）
+ *   +NWIP:0,192.168.1.2,255.255.255.0,192.168.1.1 —�?IP �?*�?2** 个字�? *
+ * 做法：跳过前�?'+'，按逗号切成字段；先找第一�?看起来像 IPv4"的字段，
+ * 找不到再退�?最后一个逗号�?。这样两种格式都不用分别写解析器�? *
+ * @param line 输入行（不含 CRLF�? * @param out  输出缓冲
  * @param size 缓冲大小
  * @return true=取到
  */
@@ -574,7 +518,7 @@ static bool parse_ip (const char * line, char * out, uint16_t size)
 
         if (('0' <= *p) && (*p <= '9') && (0U == field))
         {
-            /* 候选 IPv4 起点：必须形如 d.d.d.d */
+            /* 候�?IPv4 起点：必须形�?d.d.d.d */
             const char * q = p;
             uint8_t dots = 0U;
             uint8_t digits = 0U;
@@ -623,7 +567,7 @@ static bool parse_ip (const char * line, char * out, uint16_t size)
         p++;
     }
 
-    /* 兜底: 取最后一个逗号之后的内容 */
+    /* 兜底: 取最后一个逗号之后的内�?*/
     {
         const char * last = strrchr(line, ',');
 
@@ -649,14 +593,11 @@ static bool parse_ip (const char * line, char * out, uint16_t size)
 }
 
 /**
- * @brief 从 +WFJAP:1 行里取出真实的 SSID
+ * @brief �?+WFJAP:1 行里取出真实�?SSID
  *
- * 实测格式: +WFJAP:1,'CMCC-xxxx',192.168.1.2 —— SSID 是第一个引号对里的字段。
- * 模块实际加入哪一路, 就把哪一路回填进 s.ssid: 修复"联网中/失败页 SSID 显示
- * 问号"(配置还没记住时, 屏幕上根本没有可显示的 SSID)。
- *
- * @param line 输入行（不含 CRLF）
- * @param out  输出缓冲
+ * 实测格式: +WFJAP:1,'CMCC-xxxx',192.168.1.2 —�?SSID 是第一个引号对里的字段�? * 模块实际加入哪一�? 就把哪一路回填进 s.ssid: 修复"联网�?失败�?SSID 显示
+ * 问号"(配置还没记住�? 屏幕上根本没有可显示�?SSID)�? *
+ * @param line 输入行（不含 CRLF�? * @param out  输出缓冲
  * @param size 缓冲大小
  * @return true=取到非空 SSID
  */
@@ -686,15 +627,11 @@ static bool parse_ssid (const char * line, char * out, uint16_t size)
 }
 
 /**
- * @brief 投递一条 AT 命令并登记归属
- *
- * 仅在 at_engine_idle() 为 true 时可成功（单飞行约束）。
- *
- * @param cmd   命令（引擎自动补 CRLF）
- * @param tmo   超时(ms)
+ * @brief 投递一�?AT 命令并登记归�? *
+ * 仅在 at_engine_idle() �?true 时可成功（单飞行约束）�? *
+ * @param cmd   命令（引擎自动补 CRLF�? * @param tmo   超时(ms)
  * @param owner 归属，完成时 on_cmd_done() 据此分发
- * @return true=已投递
- */
+ * @return true=已投�? */
 static bool at_send_owned (const char * cmd, uint32_t tmo, cmd_owner_t owner)
 {
     at_result_t r;
@@ -926,15 +863,13 @@ static bool weather_cfg_save(const provisioning_config_t *config)
 }
 
 /**
- * @brief 从 +TIME:<date>,<time> 解析出 HH:MM 与 MM-DD
+ * @brief �?+TIME:<date>,<time> 解析�?HH:MM �?MM-DD
  *
  * 实测格式：`+TIME:2026-10-03,11:30:51`
  *
- * @param buf    不含 "+TIME:" 前缀的响应内容
- * @param time5  输出 "HH:MM"
+ * @param buf    不含 "+TIME:" 前缀的响应内�? * @param time5  输出 "HH:MM"
  * @param size   输出缓冲大小
- * @param date11 输出 "MM-DD"（可传 NULL）
- */
+ * @param date11 输出 "MM-DD"（可�?NULL�? */
 static void time_line_parse (const char * buf, char * time5, uint16_t size, char * date11)
 {
     const char * colon;
@@ -965,7 +900,7 @@ static void time_line_parse (const char * buf, char * time5, uint16_t size, char
     mm = (colon[3] - '0') * 10 + (colon[4] - '0');
     snprintf(time5, size, "%02d:%02d", hh, mm);
 
-    /* 日期: buf 形如 "2026-10-03,11:30:51" -> 取 [5..9] = "10-03" */
+    /* 日期: buf 形如 "2026-10-03,11:30:51" -> �?[5..9] = "10-03" */
     if ((NULL != date11) && (strlen(buf) >= 10U))
     {
         memcpy(date11, &buf[5], 5);
@@ -974,12 +909,10 @@ static void time_line_parse (const char * buf, char * time5, uint16_t size, char
 }
 
 /**
- * @brief 在引擎响应里找 +TIME: 行并解析
+ * @brief 在引擎响应里�?+TIME: 行并解析
  * @param time5  输出
  * @param size   大小
- * @param date11 输出日期（可传 NULL）
- * @return true=找到并解析成功
- */
+ * @param date11 输出日期（可�?NULL�? * @return true=找到并解析成�? */
 static bool take_time (char * time5, uint16_t size, char * date11)
 {
     const char * b = at_engine_resp()->buf;
@@ -999,7 +932,7 @@ static bool take_time (char * time5, uint16_t size, char * date11)
                 if (l < (uint16_t)(sizeof(line) - 1U))
                 {
                     line[l] = b[i + 6U + l];
-                    l++;                      /* 必须递增, 否则 l 恒为 0 该循环永不退出 */
+                    l++;                      /* 必须递增, 否则 l 恒为 0 该循环永不退�?*/
                 }
                 else
                 {
@@ -1015,10 +948,9 @@ static bool take_time (char * time5, uint16_t size, char * date11)
 }
 
 /**
- * @brief 构造心知天气 now.json 的完整 URL
+ * @brief 构造心知天�?now.json 的完�?URL
  *
- * 实测：裸 URL 即可，`&` `?` 都不需转义或加单引号。
- *
+ * 实测：裸 URL 即可，`&` `?` 都不需转义或加单引号�? *
  * @param buf  输出
  * @param size 大小
  */
@@ -1043,8 +975,7 @@ static void build_url (char * buf, uint16_t size, bool daily)
 
 /**
  * @brief 投递一次天气请求（非阻塞）
- * @return true=已投递
- */
+ * @return true=已投�? */
 static bool fetch_weather_start (void)
 {
     char url[224];
@@ -1069,12 +1000,11 @@ static bool fetch_weather_start (void)
     printf("[wx] fetch %s\r\n", url);
     if (weather_http_get_start(url, WEATHER_HTTP_TIMEOUT_MS))
     {
-        s.cmd = CMD_HTTP_NOW;        /* 当前是 now.json 请求 */
-        /* 记发起时刻, 让 OLED 能显示"已经等了几秒"。
-         * 2026-10-04 的误判: 抓到的日志停在 [hb] 1s(请求刚发出 1 秒)就被当成
-         * "抓取有问题"。屏幕上必须能看出"还在飞"和"等了几秒"。 */
+        s.cmd = CMD_HTTP_NOW;        /* 当前�?now.json 请求 */
+        /* 记发起时�? �?OLED 能显�?已经等了几秒"�?         * 2026-10-04 的误�? 抓到的日志停�?[hb] 1s(请求刚发�?1 �?就被当成
+         * "抓取有问�?。屏幕上必须能看�?还在�?�?等了几秒"�?*/
         s.fetch_t0  = at_engine_now_ms();
-        s.fetch_sec = 0xFFFFFFFFU;    /* 强制首帧就重绘 */
+        s.fetch_sec = 0xFFFFFFFFU;    /* 强制首帧就重�?*/
         s.daily_retry_left = WEATHER_DAILY_RETRY;
         s.ui_dirty  = true;
         return true;
@@ -1083,7 +1013,7 @@ static bool fetch_weather_start (void)
 }
 
 /**
- * @brief 天气请求完成后解析 JSON
+ * @brief 天气请求完成后解�?JSON
  */
 static bool fetch_weather_now_done (void)
 {
@@ -1111,9 +1041,8 @@ static bool fetch_weather_now_done (void)
         return false;
     }
 
-    /* now.json 整体覆盖 s.wx 时会把上一轮的 daily(高低温)与短报文里缺失的
-     * 湿度/风速一并清掉 —— 表现为"今日温度/风速有时不显示, 要刷新一次"。
-     * 覆盖前把上一轮的可选字段合并回来(数据略旧好过整行空白)。 */
+    /* now.json 整体覆盖 s.wx 时会把上一轮的 daily(高低�?与短报文里缺失的
+     * 湿度/风速一并清�?—�?表现�?今日温度/风速有时不显示, 要刷新一�?�?     * 覆盖前把上一轮的可选字段合并回�?数据略旧好过整行空白)�?*/
     if (s.wx_valid)
     {
         if (s.wx.daily_valid)
@@ -1200,8 +1129,7 @@ static void fetch_weather_daily_done (void)
 /* ===================== 命令结果分发 ===================== */
 
 /**
- * @brief 处理普通（非 HTTP）命令完成
- * @param r 引擎结果
+ * @brief 处理普通（�?HTTP）命令完�? * @param r 引擎结果
  */
 static void on_cmd_done (at_result_t r)
 {
@@ -1211,8 +1139,7 @@ static void on_cmd_done (at_result_t r)
     switch (s.cmd)
     {
         case CMD_AT:
-            /* 冷启动 AT 自检可能被截断；不以自检结果判定模块死活。
-             * 后续启动模式收敛会尝试 STA 配置，并等待模块重启 URC。 */
+            /* 冷启�?AT 自检可能被截断；不以自检结果判定模块死活�?             * 后续启动模式收敛会尝�?STA 配置，并等待模块重启 URC�?*/
             printf("[wx] AT self-test: %s (cold-start may truncate reply)\r\n",
                    (AT_RES_OK == r) ? "OK" :
                    ((AT_RES_TIMEOUT == r) ? "TIMEOUT (normal on cold start)" : "ERROR"));
@@ -1292,20 +1219,18 @@ static void on_cmd_done (at_result_t r)
             }
             else if (++s.tz_fail >= TZ_MAX_FAIL)
             {
-                /* 放弃对时，但必须放行链路：置 true 当作"已处理"，
-                 * 否则 poll 里的 TZONE 分支会永远满足 !timezone_set，
-                 * 把天气取数饿死。 */
+                /* 放弃对时，但必须放行链路：置 true 当作"已处�?�?                 * 否则 poll 里的 TZONE 分支会永远满�?!timezone_set�?                 * 把天气取数饿死�?*/
                 printf("[wx] TZONE failed %u times, skip time sync (weather fetch continues)\r\n",
                        (unsigned) s.tz_fail);
                 s.timezone_set = true;
-                s.sntp_done    = true;   /* SNTP 依赖时区，一并跳过 */
+                s.sntp_done    = true;   /* SNTP 依赖时区，一并跳�?*/
             }
             break;
 
         case CMD_SNTP:
             printf("[wx] SNTP %s (settle in %ums)\r\n",
                    (AT_RES_OK == r) ? "started" : "FAIL", (unsigned)SNTP_SETTLE_MS);
-            /* SNTP 的 OK 仅代表命令被接受；延时后在已连接分支显式查 AT+TIME。 */
+            /* SNTP �?OK 仅代表命令被接受；延时后在已连接分支显式�?AT+TIME�?*/
             s.time_check_pending = true;
             s.time_check_due_ms = at_engine_now_ms() + SNTP_SETTLE_MS;
             break;
@@ -1341,8 +1266,8 @@ static void on_cmd_done (at_result_t r)
             break;
 
         case CMD_NWIP:
-            /* 结果不在这判: +NWIP:0,<ip>,<mask>,<gw> 以 '+' 开头会被 line_done()
-             * 收进 URC FIFO, 由 poll 第 2c 步统一消费。这里只留失败日志。 */
+            /* 结果不在这判: +NWIP:0,<ip>,<mask>,<gw> �?'+' 开头会�?line_done()
+             * 收进 URC FIFO, �?poll �?2c 步统一消费。这里只留失败日志�?*/
             if (AT_RES_OK != r)
             {
                 printf("[wx] NWIP query failed (err=%d)\r\n",
@@ -1352,10 +1277,8 @@ static void on_cmd_done (at_result_t r)
             break;
 
         case CMD_WFCAP:
-            /* ⚠ 不要再把 ERROR:-7 直接当成"无 profile"：只复位 RA 板子时模块往往
-             * **已经连着**，这条错误只是"没必要再连"，profile 其实还在 NVRAM。
-             * 真实是否已连上由阶梯第一级的 AT+WFSTA 回答决定。
-             * 成功时不打印：阶梯下一跳的打点已经覆盖了状态迁移。 */
+            /* �?不要再把 ERROR:-7 直接当成"�?profile"：只复位 RA 板子时模块往往
+             * **已经连着**，这条错误只�?没必要再�?，profile 其实还在 NVRAM�?             * 真实是否已连上由阶梯第一级的 AT+WFSTA 回答决定�?             * 成功时不打印：阶梯下一跳的打点已经覆盖了状态迁移�?*/
             if (AT_RES_OK != r)
             {
                 printf("[wx] WFCAP rejected (err=%d)\r\n",
@@ -1365,16 +1288,15 @@ static void on_cmd_done (at_result_t r)
             break;
 
         case CMD_WFJAPA:
-            /* 失败日志由阶梯的限流打点负责（ladder_sig 含 err_code），
-             * 这里只在成功时打一行，因为"发起连接被接受"是有意义的状态迁移。 */
+            /* 失败日志由阶梯的限流打点负责（ladder_sig �?err_code），
+             * 这里只在成功时打一行，因为"发起连接被接�?是有意义的状态迁移�?*/
             if (AT_RES_OK == r)
             {
                 printf("[wx] WFJAPA accepted, waiting +WFSTA / +WFJAP\r\n");
             }
             reconnect_if_needed();
-            /* 失败计数放在这里而不是 poll 里: on_cmd_done 每条命令只跑一次，
-             * 若在 poll 里按 tick 自增, 10ms 一跳几秒就误判"用尽"。
-             * ⚠ 已连上时不计失败: 命令本身回 OK, 且不该再退阶梯。 */
+            /* 失败计数放在这里而不�?poll �? on_cmd_done 每条命令只跑一次，
+             * 若在 poll 里按 tick 自增, 10ms 一跳几秒就误判"用尽"�?             * �?已连上时不计失败: 命令本身�?OK, 且不该再退阶梯�?*/
             if ((AT_RES_OK != r) && s.provision_active &&
                 (s.provision_step == PROV_STEP_STA_JOIN))
             {
@@ -1430,11 +1352,8 @@ static void on_cmd_done (at_result_t r)
 /* ===================== 时间显示 ===================== */
 
 /**
- * @brief 取主页显示的时间字符串
- *
- * RA 不用内部 RTC，时间来自 DA16200 的 AT+TIME（每分钟查一次）。
- * 未拿到有效时间时显示 "--:--"（对齐 GD32 版未同步时的行为）。
- *
+ * @brief 取主页显示的时间字符�? *
+ * RA 不用内部 RTC，时间来�?DA16200 �?AT+TIME（每分钟查一次）�? * 未拿到有效时间时显示 "--:--"（对�?GD32 版未同步时的行为）�? *
  * @param buf  输出
  * @param size 大小
  */
@@ -1451,8 +1370,7 @@ static void time_str_get (char * buf, uint16_t size)
 /* ===================== UI ===================== */
 
 /**
- * @brief 重绘当前页
- */
+ * @brief 重绘当前�? */
 static void ui_refresh (void)
 {
     char time5[6];
@@ -1485,11 +1403,12 @@ static void ui_refresh (void)
 
     if (2U == s.page)
     {
-        /* 预报页: 今天 + 未来两天 (免费版 daily.json 上限 3 天)。 */
+        /* 预报�? 今天 + 未来两天 (免费�?daily.json 上限 3 �?�?*/
         ui_forecast_view_t fv;
         uint8_t fc, fi;
 
         memset(&fv, 0, sizeof(fv));
+        fv.wcode = s.wx_valid ? s.wx.code : -1;
         time_str_get(time5, sizeof(time5));
         snprintf(fv.time_str, sizeof(fv.time_str), "%s", time5);
         if (s.wx_valid)
@@ -1540,7 +1459,7 @@ static void ui_refresh (void)
         snprintf(mv.city, sizeof(mv.city), "IP");
         if (s.city[0] != '\0')
             snprintf(mv.city, sizeof(mv.city), "%.15s", s.city);
-        /* API 解析出的实际城市名优先: 即使走 IP 定位也显示真实城市 */
+        /* API 解析出的实际城市名优�? 即使�?IP 定位也显示真实城�?*/
         if (s.wx_valid && (s.wx.location[0] != '\0'))
             snprintf(mv.city, sizeof(mv.city), "%.32s", s.wx.location);
         /* GD32-latest UI contract: weather_code=-1 means "no data" (memset
@@ -1571,16 +1490,9 @@ static void ui_refresh (void)
                 snprintf(mv.feels_like_str, sizeof(mv.feels_like_str), "%d",
                          s.wx.feels_like);
             }
-            /* 心知中文 API 文案是 UTF-8，而 OLED 点阵字模按
-             * GB2312/GBK 索引的（oledfont.h 的 Hzk[]）。把 UTF-8 字节直接喂
-             * OLED_ShowString 会按 GBK 拆成两个错字 —— 这不是本工程的移植
-             * 遗漏：GD32 版 weather_ui.c / oled.c 与本工程**逐字节相同**，
-             * 它同样如此（两边都没有编码转换）。
-             *
-             * 而中文这条路目前根本铺好：oled_font_data/oled_cn_font.c 里
-             * 只有占位记录、没有任何真实字模数据，oledfont.h 的 Hzk[] 也只有
-             * 7 个汉字。英文模式可直接显示 ASCII now.text；非英文模式暂用 code
-             * 表兜底，待中文字模生成后再接入完整 UTF-8 到 GBK 显示转换。 */
+            /* 心知中文 API 文案�?UTF-8，�?OLED 点阵字模�?             * GB2312/GBK 索引的（oledfont.h �?Hzk[]）。把 UTF-8 字节直接�?             * OLED_ShowString 会按 GBK 拆成两个错字 —�?这不是本工程的移�?             * 遗漏：GD32 �?weather_ui.c / oled.c 与本工程**逐字节相�?*�?             * 它同样如此（两边都没有编码转换）�?             *
+             * 而中文这条路目前根本铺好：oled_font_data/oled_cn_font.c �?             * 只有占位记录、没有任何真实字模数据，oledfont.h �?Hzk[] 也只�?             * 7 个汉字。英文模式可直接显示 ASCII now.text；非英文模式暂用 code
+             * 表兜底，待中文字模生成后再接入完�?UTF-8 �?GBK 显示转换�?*/
             /* WEATHER_LANG=en yields ASCII now.text, so show the API's actual
              * condition. Code-table fallback is for non-English/UTF-8 UI paths.
              * This avoids code 5 Foggy being mislabeled as code 30 Sandst. */
@@ -1617,19 +1529,14 @@ static void ui_refresh (void)
         }
         else
         {
-            /* ⚠ 没拿到天气时**直接把当前阶段显示在屏幕上**（2026-10-04）。
-             *
-             * 之前只显示 "waiting data.."，无法区分"请求还在飞"、"HTTP 非 200"
-             * 和"cJSON 解析失败"三种完全不同的情况，只能靠翻串口日志 ——
-             * 而结论行偏偏容易落在串口窗口外。2026-10-04 这次又因此误判：
-             * 抓到的日志停在 `[hb] 1s ... res=no fetch yet`，那只是**请求刚发出
-             * 1 秒**，模块还没回包，就被当成"抓取有问题"。屏幕必须能区分
-             * "还在飞"和"卡住了"，否则每次都会重复这个误判。
-             *
+            /* �?没拿到天气时**直接把当前阶段显示在屏幕�?*�?026-10-04）�?             *
+             * 之前只显�?"waiting data.."，无法区�?请求还在�?�?HTTP �?200"
+             * �?cJSON 解析失败"三种完全不同的情况，只能靠翻串口日志 —�?             * 而结论行偏偏容易落在串口窗口外�?026-10-04 这次又因此误判：
+             * 抓到的日志停�?`[hb] 1s ... res=no fetch yet`，那只是**请求刚发�?             * 1 �?*，模块还没回包，就被当成"抓取有问�?。屏幕必须能区分
+             * "还在�?�?卡住�?，否则每次都会重复这个误判�?             *
              * 优先级（从上到下）：
-             *   1. 请求在途        -> "fetching.. Ns"（带已等秒数，看得见它在走）
-             *   2. 已联网但没结论  -> 结论本身（OK/ERR/no fetch yet）
-             *   3. 还没联网        -> 联网阶段（connecting / connecting.. Ns） */
+             *   1. 请求在�?       -> "fetching.. Ns"（带已等秒数，看得见它在走）
+             *   2. 已联网但没结�? -> 结论本身（OK/ERR/no fetch yet�?             *   3. 还没联网        -> 联网阶段（connecting / connecting.. Ns�?*/
             if (weather_http_busy())
             {
                 uint32_t el = (uint32_t)(at_engine_now_ms() - s.fetch_t0) / 1000U;
@@ -1681,15 +1588,11 @@ void weather_task_init (void)
     printf("[wx] task init: boot %s %s, first action = force module STA mode\r\n",
            __DATE__, __TIME__);
 
-    /* 用户要求: 每次开机先用 AT 命令测试模块, 再走后续联网/天气。
-     *
-     * ⚠ 超时只给 800ms 而不是 2000ms（2026-10-04 调整）：
-     *   实测冷启动这条 AT 可能被截断（只回 1 个字符就 TIMEOUT），它只是
-     *   "模块活着没有"的形式确认。而引擎时钟是按主循环 tick 累加的，
-     *   OLED 重绘一轮要 ~100ms，所以 2000ms 的引擎时间在真实时间上远不止
-     *   2 秒，整轮开机白等 —— 之前"抓日志等不到结果"就有它一份。
-     *   自检失败不致命；启动 STA 流程仍会尝试发送模式切换命令。
-     */
+    /* 用户要求: 每次开机先�?AT 命令测试模块, 再走后续联网/天气�?     *
+     * �?超时只给 800ms 而不�?2000ms�?026-10-04 调整）：
+     *   实测冷启动这�?AT 可能被截断（只回 1 个字符就 TIMEOUT），它只�?     *   "模块活着没有"的形式确认。而引擎时钟是按主循环 tick 累加的，
+     *   OLED 重绘一轮要 ~100ms，所�?2000ms 的引擎时间在真实时间上远不止
+     *   2 秒，整轮开机白�?—�?之前"抓日志等不到结果"就有它一份�?     *   自检失败不致命；启动 STA 流程仍会尝试发送模式切换命令�?     */
     if (!at_send_owned("AT", 800U, CMD_AT))
     {
         printf("[wx] AT self-test could not submit (engine busy)\r\n");
@@ -1699,7 +1602,7 @@ void weather_task_init (void)
         printf("[wx] AT self-test sent\r\n");
     }
 
-    /* 开机状态总表: 之后每次界面刷新都会再打一行, 两行即可看清整个启动过程 */
+    /* 开机状态总表: 之后每次界面刷新都会再打一�? 两行即可看清整个启动过程 */
     dump_state("boot");
 }
 
@@ -2330,7 +2233,7 @@ void weather_task_poll (void)
             }
             else
             {
-                s.page = (uint8_t)((s.page + 1U) % 3U);  /* 0主/1WiFi/2预报 */
+                s.page = (uint8_t)((s.page + 1U) % 3U);  /* 0�?1WiFi/2预报 */
                 printf("[wx] key%u: click -> page %u\r\n",
                        (unsigned)id, (unsigned)s.page);
                 s.ui_dirty = true;
@@ -2360,7 +2263,7 @@ void weather_task_poll (void)
                 break;
 
             case KEY_EVT_DOUBLE:
-                s.page = (uint8_t)((s.page + 1U) % 3U);  /* 0主/1WiFi/2预报 */
+                s.page = (uint8_t)((s.page + 1U) % 3U);  /* 0�?1WiFi/2预报 */
                 printf("[wx] key%u: double -> page %u\r\n",
                        (unsigned)id, (unsigned)s.page);
                 s.ui_dirty = true;
@@ -2397,7 +2300,7 @@ void weather_task_poll (void)
 
     if (!s.provision_active && s.provision_requested)
         provision_start();
-    /* ---------- 2. 联网：URC 快速路径 + 超时阶梯 ---------- */
+    /* ---------- 2. 联网：URC 快速路�?+ 超时阶梯 ---------- */
     if (!s.provision_active && s.boot_sta_ready &&
         ((WIFI_STAT_CONNECTING == s.status) || (WIFI_STAT_IDLE == s.status)))
     {
@@ -2409,8 +2312,8 @@ void weather_task_poll (void)
             char joined[33];
 
             printf("[wx] +WFJAP:1 urc='%s'\r\n", urc);
-            /* 模块实际加入的 SSID 回填 s.ssid: 修"联网中/失败页 SSID 显示
-             * 问号"——屏幕上要显示的就是真实加入的这一路。 */
+            /* 模块实际加入�?SSID 回填 s.ssid: �?联网�?失败�?SSID 显示
+             * 问号"——屏幕上要显示的就是真实加入的这一路�?*/
             if (parse_ssid(urc, joined, sizeof(joined)) &&
                 (0 != strcmp(joined, s.ssid)))
             {
@@ -2424,38 +2327,29 @@ void weather_task_poll (void)
             }
             else
             {
-                /* ⚠ 2026-10-12: 这里不能只说"没有 IP 字段"。
-                 * parse_ip() 现在会拒绝 0.0.0.0 / x.x.x.0 / 169.254.* /
+                /* �?2026-10-12: 这里不能只说"没有 IP 字段"�?                 * parse_ip() 现在会拒�?0.0.0.0 / x.x.x.0 / 169.254.* /
                  * 10.0.0.* 这些不可用地址，所以失败既可能是字段缺失，
-                 * 也可能是拿到了占位地址 —— 两种都意味着还没真连上。 */
+                 * 也可能是拿到了占位地址 —�?两种都意味着还没真连上�?*/
                 printf("[wx] +WFJAP:1 has no usable IP, fall back to NWIP query\r\n");
                 s.wifi_step  = WIFI_STEP_NWIP_QUERY;
                 s.connect_t0 = now;
             }
         }
-        /* 2b. +WFSTA:1 —— 手册 L1149 定义的**权威**连接状态。
-         *
-         * ⚠ 为什么必须用这条，而不是继续从 +NWIP 里猜（2026-10-12 修正）：
-         *   手册 L832 明确 `AT+NWIP` 的第一个参数是**接口号**（0=WLAN0/STA，
-         *   1=WLAN1/Soft-AP），`AT+NWIP=?` 的响应格式是 `+NWIP:<iface>,<ip>,...`。
-         *   实测模块回的是 `+NWIP:1,10.0.0.1,255.255.255.0,10.0.0.1` ——
-         *   第一个字段是 **1 = Soft-AP 接口**，10.0.0.1 是模组内置 SoftAP 的地址，
-         *   完全不代表 STA 已经从 CMCC-xxxx 拿到地址。
-         *   之前把"能解出一个像样 IP"当成"已连上"，就是被这条误导的。
-         *   AT+WFSTA 没有这种歧义：1=已关联，0=未关联。
-         */
+        /* 2b. +WFSTA:1 —�?手册 L1149 定义�?*权威**连接状态�?         *
+         * �?为什么必须用这条，而不是继续从 +NWIP 里猜�?026-10-12 修正）：
+         *   手册 L832 明确 `AT+NWIP` 的第一个参数是**接口�?*�?=WLAN0/STA�?         *   1=WLAN1/Soft-AP），`AT+NWIP=?` 的响应格式是 `+NWIP:<iface>,<ip>,...`�?         *   实测模块回的�?`+NWIP:1,10.0.0.1,255.255.255.0,10.0.0.1` —�?         *   第一个字段是 **1 = Soft-AP 接口**�?0.0.0.1 是模组内�?SoftAP 的地址�?         *   完全不代�?STA 已经�?CMCC-xxxx 拿到地址�?         *   之前�?能解出一个像�?IP"当成"已连�?，就是被这条误导的�?         *   AT+WFSTA 没有这种歧义�?=已关联，0=未关联�?         */
         else if (at_engine_urc_get("+WFSTA:1", urc, sizeof(urc)))
         {
             printf("[wx] +WFSTA:1 => module IS associated with an AP\r\n");
-            /* 关联成功但还不知道地址，接着问一次 IP */
+            /* 关联成功但还不知道地址，接着问一�?IP */
             (void)at_send_owned("AT+NWIP=?", 2500U, CMD_NWIP);
         }
         else if (at_engine_urc_get("+WFSTA:0", urc, sizeof(urc)))
         {
-            /* 未关联。这不是故障，只是阶梯没爬上去，不打印以免刷屏 */
+            /* 未关联。这不是故障，只是阶梯没爬上去，不打印以免刷�?*/
             s.wifi_sta_ok = false;
         }
-        /* 2c. +NWIP 回读：模块已连上但 URC 被错过时走这里 */
+        /* 2c. +NWIP 回读：模块已连上�?URC 被错过时走这�?*/
         else if (at_engine_urc_get("+NWIP", urc, sizeof(urc)))
         {
             printf("[wx] +NWIP urc='%s'\r\n", urc);
@@ -2479,9 +2373,8 @@ void weather_task_poll (void)
             uint16_t lad_sig = (uint16_t)(((unsigned)s.wifi_step << 8) |
                                           ((unsigned)(lad_err & 0xFF)));
 
-            /* 日志限流：阶梯每 8s 一跳，不限流的话一次失败会刷出上百行几乎相同的文本，
-             * 把真正有意义的状态迁移埋掉。同一个 (step, err) 只打第一遍，
-             * 之后每 LADDER_LOG_REPEAT 次再打一次"还在原地"。 */
+            /* 日志限流：阶梯每 8s 一跳，不限流的话一次失败会刷出上百行几乎相同的文本�?             * 把真正有意义的状态迁移埋掉。同一�?(step, err) 只打第一遍，
+             * 之后�?LADDER_LOG_REPEAT 次再打一�?还在原地"�?*/
             if (s.ladder_sig != lad_sig)
             {
                 s.ladder_sig    = lad_sig;
@@ -2511,22 +2404,17 @@ void weather_task_poll (void)
                     break;
 
                 case WIFI_STEP_WAIT_URC:
-                    /* 等不到 URC -> 让模块用 NVRAM profile 自己连 */
+                    /* 等不�?URC -> 让模块用 NVRAM profile 自己�?*/
                     (void)at_send_owned("AT+WFCAP", 3000U, CMD_WFCAP);
                     s.wifi_step = WIFI_STEP_WFCAP;
                     break;
 
                 case WIFI_STEP_WFCAP:
                 default:
-                    /* 显式带 SSID/PWD：连 + 写 NVRAM，最兜底。
-                     *
-                     * ⚠ 2026-10-12 修正：原来这里是 `case WFCAP:` 和 `default:`
-                     *   合并的，fallthrough 进去后无条件执行 `s.wifi_try = 0U`。
-                     *   结果是：每次重试都把失败计数清零，于是
-                     *   on_cmd_done 里的 `wifi_try >= WIFI_WFJAPA_MAX_TRY` 永远不成立，
-                     *   阶梯卡在第 3 级无限循环 AT+WFJAPA，既不换手段也不退���重爬。
-                     *   现场证据：日志里 step=3 try=0 / try=1 交替出现且永不变。
-                     *   现在计数完全交给 on_cmd_done 维护，这里不再碰 wifi_try。 */
+                    /* 显式�?SSID/PWD：连 + �?NVRAM，最兜底�?                     *
+                     * �?2026-10-12 修正：原来这里是 `case WFCAP:` �?`default:`
+                     *   合并的，fallthrough 进去后无条件执行 `s.wifi_try = 0U`�?                     *   结果是：每次重试都把失败计数清零，于�?                     *   on_cmd_done 里的 `wifi_try >= WIFI_WFJAPA_MAX_TRY` 永远不成立，
+                     *   阶梯卡在�?3 级无限循�?AT+WFJAPA，既不换手段也不退���重爬�?                     *   现场证据：日志里 step=3 try=0 / try=1 交替出现且永不变�?                     *   现在计数完全交给 on_cmd_done 维护，这里不再碰 wifi_try�?*/
                      snprintf(cmd, sizeof(cmd), "AT+WFJAPA=%s,%s",
                               s.ssid, s.provision_password);
                      (void)at_send_owned(cmd, 30000U, CMD_WFJAPA);
@@ -2537,7 +2425,7 @@ void weather_task_poll (void)
 
     }
 
-    /* ---------- 3. 引擎轮询（工程内唯一调用点, §4 单飞行） ---------- */
+    /* ---------- 3. 引擎轮询（工程内唯一调用�? §4 单飞行） ---------- */
     {
         at_result_t r = at_engine_poll();
 
@@ -2558,7 +2446,7 @@ void weather_task_poll (void)
         {
             if ((CMD_HTTP_NOW == s.cmd) || (CMD_HTTP_DAILY == s.cmd))
             {
-                /* HTTP 命令: 结果归 weather_http */
+                /* HTTP 命令: 结果�?weather_http */
                 weather_http_on_engine_done(r);
                 if (weather_http_done())
                 {
@@ -2619,7 +2507,7 @@ void weather_task_poll (void)
                 s.wx_age_ms = 0U;
             }
         }
-        /* 4b2. TODAY/wind 行缺失 -> 限次快速补抓, 不等满 refresh 周期 */
+        /* 4b2. TODAY/wind 行缺�?-> 限次快速补�? 不等�?refresh 周期 */
         else if (s.wx_valid && (0U == s.wx.daily_valid) &&
                  (s.daily_retry_left > 0U) &&
                  ((int32_t)(now - s.daily_retry_due_ms) >= 0))
@@ -2632,7 +2520,7 @@ void weather_task_poll (void)
                        (unsigned)s.daily_retry_left);
             }
         }
-        /* 4c. 联网后初始化链路: 查 IP -> 设时区 -> SNTP */
+        /* 4c. 联网后初始化链路: �?IP -> 设时�?-> SNTP */
         else if (s.status == WIFI_STAT_CONNECTED)
         {
             if (s.time_check_pending)
@@ -2661,20 +2549,16 @@ void weather_task_poll (void)
             }
             else if (!s.wx_valid && (CMD_NONE == s.cmd))
             {
-                /* 链路就绪但还没拉到天气 -> 立即拉一次。
-                 *
-                 * ⚠ 不再要求 s.sntp_done（2026-10-12）。原来三段严格串行，
-                 * 只要 TZONE 或 SNTP 没成功就永远走不到这里。取天气是主功能，
-                 * 对时只是附加价值，不能让它挡住。
-                 * 实际效果：连上后的第一个空闲 tick 就发天气请求，
-                 * TZONE/SNTP 在此之前的那一两个 tick 里已完成或已放弃。 */
+                /* 链路就绪但还没拉到天�?-> 立即拉一次�?                 *
+                 * �?不再要求 s.sntp_done�?026-10-12）。原来三段严格串行，
+                 * 只要 TZONE �?SNTP 没成功就永远走不到这里。取天气是主功能�?                 * 对时只是附加价值，不能让它挡住�?                 * 实际效果：连上后的第一个空�?tick 就发天气请求�?                 * TZONE/SNTP 在此之前的那一两个 tick 里已完成或已放弃�?*/
                 if (fetch_weather_start())
                 {
                     printf("[wx] first fetch issued\r\n");
                 }
             }
         }
-        /* 4d. 定时查时间 */
+        /* 4d. 定时查时�?*/
         else if ((CMD_NONE == s.cmd) && ((now - s.time_poll_ms) >= WEATHER_TIME_POLL_MS))
         {
             s.time_poll_ms = now;
@@ -2696,25 +2580,21 @@ void weather_task_poll (void)
     }
 #endif
 
-    /* ---------- 5b. fetch 在途时的 1s 心跳（仅在途时才有） ----------
+    /* ---------- 5b. fetch 在途时�?1s 心跳（仅在途时才有�?----------
      *
-     * 2026-10-04 排查依据：常规心跳 5s 一行，而 NWHTC 一旦在途就可能把
-     * 主循环拖住，5s 那行迟迟不来，无法区分"引擎停在哪个状态"和"只是没到点"。
-     * 所以在 weather_http 在途期间改成 1s 一行，直接看到引擎状态迁移：
+     * 2026-10-04 排查依据：常规心�?5s 一行，�?NWHTC 一旦在途就可能�?     * 主循环拖住，5s 那行迟迟不来，无法区�?引擎停在哪个状�?�?只是没到�?�?     * 所以在 weather_http 在途期间改�?1s 一行，直接看到引擎状态迁移：
      *   eng=1 (SENDING) -> 发出去了，等 TX 完成
-     *   eng=2 (WAIT)    -> 命令已发出，等 +NWHTCSTATUS
-     *   eng=0 (IDLE)    -> 引擎已收口，下一步就是 [wx] http done
-     * 不在途时行为不变，仍是 WEATHER_HB_DIAG_MS（低频），不违反诊断低频原则。 */
+     *   eng=2 (WAIT)    -> 命令已发出，�?+NWHTCSTATUS
+     *   eng=0 (IDLE)    -> 引擎已收口，下一步就�?[wx] http done
+     * 不在途时行为不变，仍�?WEATHER_HB_DIAG_MS（低频），不违反诊断低频原则�?*/
     if (weather_http_busy() && ((now - s.hb_fast) >= 1000U))
     {
         uint32_t sec = (uint32_t)(now - s.fetch_t0) / 1000U;
 
         s.hb_fast = now;
 
-        /* 同一个 1s 节拍顺便刷新屏幕上的"已等 N 秒"。
-         * 不另开节拍: 在途时本来就要 1s 一次, 复用它最省, 而且屏幕
-         * 和日志说的是同一个数字, 不会出现两边对不上的情况。
-         * 每秒只重绘一行文字, 开销可忽略(软 SPI 约 40~90ms/屏)。 */
+        /* 同一�?1s 节拍顺便刷新屏幕上的"已等 N �?�?         * 不另开节拍: 在途时本来就要 1s 一�? 复用它最�? 而且屏幕
+         * 和日志说的是同一个数�? 不会出现两边对不上的情况�?         * 每秒只重绘一行文�? 开销可忽�?�?SPI �?40~90ms/�?�?*/
         if (sec != s.fetch_sec)
         {
             s.fetch_sec = sec;
@@ -2723,14 +2603,12 @@ void weather_task_poll (void)
         hb_print(now);
     }
 
-    /* ---------- 6. 重绘 + 状态快照 ---------- */
+    /* ---------- 6. 重绘 + 状态快�?---------- */
     if (s.ui_dirty)
     {
         s.ui_dirty = false;
         ui_refresh();
-        /* 每次状态迁移（联网成功 / 抓取完成 / 按键翻页 / 页面切换）都打一行
-         * 完整状态，这样"当前处于哪个状态"永远是日志里可查的，不需要
-         * 把各处零散的小段拼起来猜，也不需要用户掐时间等某一行出现。 */
+        /* 每次状态迁移（联网成功 / 抓取完成 / 按键翻页 / 页面切换）都打一�?         * 完整状态，这样"当前处于哪个状�?永远是日志里可查的，不需�?         * 把各处零散的小段拼起来猜，也不需要用户掐时间等某一行出现�?*/
         dump_state("redraw");
     }
 }

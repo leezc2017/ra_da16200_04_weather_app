@@ -48,11 +48,11 @@
  *      high_str/provisioning) filled by weather_task; ssid now also feeds
  *      the provisioning/connecting/failed pages;
  *   7) page cycle (2026-10-17): key click/double cycles 3 pages --
- *      0 main weather, 1 WiFi info, 2 forecast (redesign 2026-10-17,
- *      second round: 16px current time on rows 0-1, 8px current
- *      temperature + degree on row2, 8px tomorrow + day-after lo/hi on
- *      row3; the old "预报/Today Hi/Lo" header with the today row is gone
- *      -- no high/low hint text, per user request);
+ *      0 main weather, 1 WiFi info, 2 forecast (3rd-round redesign
+ *      2026-10-17: 16px row0 = current weather glyphs + current
+ *      temperature + time, 16px rows2-3 = tomorrow/day-after lo/hi;
+ *      no "预报/Today Hi/Lo" header, no separate current-temp row and no
+ *      today row any more, per user request);
  *   8) provisioning page row2 shows the fixed SoftAP name "AP:leeWethWifi"
  *      (the hotspot the phone must join), not the saved home SSID.
  *
@@ -103,13 +103,14 @@ typedef struct {
     uint8_t     page;       /* page index (extension) */
 } ui_wifi_view_t;
 
-/* Forecast page view data (2026-10-17 redesign, user layout):
- *   row0 (16px): current time             ("12:34" or "--:--")
- *   row2 (8px):  current temperature      (UI paints the degree bitmap)
- *   row3 (8px):  tomorrow + day-after     (each "low/high")
- * row_str[i]: "low/high" ASCII for index i (0=today unused now, 1=tomorrow,
- * 2=day-after); "--" = that day has no data. */
+/* Forecast page view data (2026-10-17 redesign, 3rd round, user layout):
+ *   row0 (16px): current weather glyphs + current temperature + time
+ *                ("12:34" or "--:--");
+ *   rows2-3 (16px): tomorrow + day-after lo/hi with small degree signs.
+ * row_str[i]: "low/high" ASCII (0=today unused now, 1=tomorrow, 2=day-after);
+ * "--" = no data for that day. */
 typedef struct {
+    int     wcode;           /* Seniverse code, -1 = no data (RA fill) */
     char    time_str[6];     /* "12:34" or "--:--" (RA fill) */
     char    temp_str[8];     /* current temp digits, e.g. "26" (RA fill) */
     char    row_str[3][12];  /* index 0=today, 1=tomorrow, 2=day-after */

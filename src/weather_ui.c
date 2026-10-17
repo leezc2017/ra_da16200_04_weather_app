@@ -5,7 +5,7 @@
  *
  * Main page row0 (16px): city name (CamelCase API city) + Chinese weather
  * glyphs selected by the Seniverse code + temperature + bitmap degree sign.
- * Rows2/3 (one 16px row): enlarged "风�?xx 湿度 xx" (16px CN glyphs, no
+ * Rows2/3 (one 16px row): enlarged "风�?xx 湿度 xx" (16px CN glyphs, no
  * units; the today hi/lo row was removed per user review). Status pages use
  * Chinese 16px glyphs; provisioning/connecting/failed pages show the SSID
  * being connected plus the configured city. See weather_ui.h for the
@@ -96,13 +96,8 @@ static void oled_cn_show(u8 x, u8 y, weather_cn_glyph_t glyph)
     }
 }
 
-/* helper: render one 8x8 CN glyph from weather_cn8_font (forecast page) */
-static void oled_cn8_show(u8 x, u8 y, weather_cn8_glyph_t glyph)
-{
-    if (glyph < WX_CN8_MAX) {
-        OLED_ShowChinese8Glyph(x, y, weather_cn8_font[glyph]);
-    }
-}
+/* helper removed 2026-10-17: the redesigned forecast page draws its
+ * tomorrow/day-after row in 16px, so no 8px CN glyph is rendered any more. */
 
 static void oled_cn_sequence(u8 x, u8 y,
                              const weather_cn_glyph_t *glyphs, u8 count)
@@ -188,51 +183,56 @@ void ui_init(void)
 
 void ui_forecast_page(const ui_forecast_view_t *v)
 {
-    /* 2026-10-17 redesign (2nd round): no forecast/Hi-Lo header anymore.
-     * rows 0-1 = 16px current time, row2 = 8px current temperature,
-     * row3 = ming/hou lo/hi per user sketch. */
+    /* 2026-10-17 redesign (3rd round, user layout):
+     * row0 (16px): current weather glyphs + current temperature + time,
+     * rows 2-3 (16px): tomorrow/day-after lo/hi with small degree signs. */
     const char *time_s = v->time_str[0] ? v->time_str : "--:--";
     const char *temp_s = v->temp_str[0] ? v->temp_str : "--";
     const char *tom    = v->row_str[1][0] ? v->row_str[1] : "--";
     const char *dat    = v->row_str[2][0] ? v->row_str[2] : "--";
-    u8 x;
+    u8 x = 0;
 
     OLED_Clear();
-    printf("[oled] forecast time=%s temp=%s tom=%s dat=%s\r\n",
-           time_s, temp_s, tom, dat);
 
-    /* rows 0-1: current time in 16px digits (5 chars = 40 px). */
-    OLED_ShowString(0, 0, (u8 *)time_s, 16);
-    printf("[oled] L0-1=%s\r\n", time_s);
-
-    /* row2: current temperature (UI paints the degree bitmap itself). */
-    OLED_ShowString(0, 2, (u8 *)temp_s, 8);
-    x = (u8)((u16)strlen(temp_s) * 6U);
-    if (x <= 118U) {
-        OLED_DrawBMP(x, 2, 8, 8, (u8 *)BMP_DEGREE);
+    /* row0: weather glyphs (16px), then current temp + degree (top half,
+     * main-page look), time always right-anchored at x=88 (5 chars = 40px). */
+    if (v->wcode >= 0) {
+        weather_cn_glyph_t glyphs[4];
+        u8 count = weather_cn_sequence(v->wcode, glyphs);
+        oled_cn_sequence(0, 0, glyphs, count);
+        x = (u8)((u16)count * 16U);
+        if (x > 0U && x <= 80U) {
+            OLED_ShowString(x, 0, (u8 *)temp_s, 16);
+            x = (u8)(x + strlen(temp_s) * 8U);
+            if (x <= 120U) {
+                OLED_DrawBMP(x, 0, 8, 8, (u8 *)BMP_DEGREE);
+            }
+        }
     }
-    printf("[oled] L2=%s\r\n", temp_s);
+    OLED_ShowString(88, 0, (u8 *)time_s, 16);
+    printf("[oled] f0 code=%d temp=%s time=%s\r\n",
+           (int)v->wcode, temp_s, time_s);
 
-    /* row3: tomorrow lo/hi, then day-after lo/hi, one 8px row. */
-    oled_cn8_show(0, 3, WX_CN8_MING);
-    OLED_ShowString(10, 3, (u8 *)tom, 8);
-    x = (u8)(10U + strlen(tom) * 6U);
+    /* rows 2-3: tomorrow lo/hi, then day-after lo/hi, 16px. */
+    oled_cn_show(0, 2, WX_CN_MING_F);
+    OLED_ShowString(18, 2, (u8 *)tom, 16);
+    x = (u8)(18U + strlen(tom) * 8U);
     if (x <= 118U) {
         OLED_DrawBMP(x, 3, 8, 8, (u8 *)BMP_DEGREE);
-        x = (u8)(x + 10U);
     }
-    if (x <= 116U) {
-        oled_cn8_show(x, 3, WX_CN8_HOU);
-        x = (u8)(x + 10U);
-    }
-    if (x <= 116U) {
-        OLED_ShowString(x, 3, (u8 *)dat, 8);
-        x = (u8)(x + strlen(dat) * 6U);
+    x = (u8)(18U + strlen(tom) * 8U + 12U);
+    /* draw the day-after pair only if glyph + value + degree all fit; a
+     * "low/high" of 6+ chars each would overflow 128px -- then skip. */
+    if ((u16)x + 18U + strlen(dat) * 8U + 8U <= 128U) {
+        oled_cn_show(x, 2, WX_CN_HOU_F);
+        x = (u8)(x + 18U);
+        OLED_ShowString(x, 2, (u8 *)dat, 16);
+        x = (u8)(x + strlen(dat) * 8U);
         if (x <= 118U) {
             OLED_DrawBMP(x, 3, 8, 8, (u8 *)BMP_DEGREE);
         }
     }
-    printf("[oled] L3=%s/%s\r\n", tom, dat);
+    printf("[oled] L2-3=ming %s hou %s\r\n", tom, dat);
 }
 
 void ui_boot_splash(void)
