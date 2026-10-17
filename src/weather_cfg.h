@@ -39,7 +39,7 @@
  * ⚠ 该串会被拼进 AT+NWHTC 命令; 若从 PC 串口手动发送, 注意 99 字节截断问题
  *   (见 doc/AT_03_心知天气.md 第 10 节)。固件内部生成的命令不受此限制。 */
 #define WEATHER_LANG             "en"
-#define WEATHER_UI_SERIAL_SIM    1U       /* 1=串口模拟128x32 OLED；0=实际OLED */
+#define WEATHER_UI_SERIAL_SIM    0U       /* 1=串口模拟128x32 OLED；0=实际OLED */
 #define WEATHER_REFRESH_MIN      15      /* 天气刷新周期(分钟) */
 #define WEATHER_REQ_TIMEOUT_MS   9000    /* HTTP 请求超时(ms) */
 

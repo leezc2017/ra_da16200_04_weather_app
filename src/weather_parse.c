@@ -48,6 +48,15 @@ int weather_parse_now(const char *body, weather_data_t *out)
         }
         cJSON *r0 = cJSON_GetArrayItem(results, 0);
 
+        cJSON *loc = cJSON_GetObjectItem(r0, "location");
+        cJSON *locname = cJSON_GetObjectItem(loc, "name");
+        if (cJSON_IsString(locname) && (NULL != locname->valuestring))
+        {
+            strncpy(parsed.location, locname->valuestring,
+                    sizeof(parsed.location) - 1);
+            parsed.location[sizeof(parsed.location) - 1] = '\0';
+        }
+
         cJSON *now = cJSON_GetObjectItem(r0, "now");
         if (now == NULL) {
             break;
@@ -100,6 +109,17 @@ int weather_parse_daily(const char *body, weather_data_t *out)
             break;
         }
         cJSON *r0 = cJSON_GetArrayItem(results, 0);
+
+        cJSON *loc = cJSON_GetObjectItem(r0, "location");
+        cJSON *locname = cJSON_GetObjectItem(loc, "name");
+        if (cJSON_IsString(locname) && (NULL != locname->valuestring))
+        {
+            strncpy(out->location, locname->valuestring,
+                    sizeof(out->location) - 1);
+            out->location[sizeof(out->location) - 1] = '\0';
+        }
+        /* else: keep the value from now.json untouched */
+
         cJSON *daily = cJSON_GetObjectItem(r0, "daily");
         if (!cJSON_IsArray(daily) || cJSON_GetArraySize(daily) < 1) {
             break;

@@ -10,7 +10,6 @@
 #include "bsp_mcu_ofs_cfg.h"
 #include "board_cfg.h"
 #include "vector_data.h"
-#define BSP_FEATURE_CTSU_VERSION                                        (1UL)
 #define RA_NOT_DEFINED 0
 #ifndef BSP_CFG_RTOS
 #if (RA_NOT_DEFINED) != (RA_NOT_DEFINED)

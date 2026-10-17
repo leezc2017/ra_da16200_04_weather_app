@@ -1,6 +1,5 @@
 /* generated HAL source file - do not edit */
 #include "hal_data.h"
-#include "../qe_gen/qe_touch_config.h"
 flash_hp_instance_ctrl_t g_flash0_ctrl;
 const flash_cfg_t g_flash0_cfg =
 { .data_flash_bgo = false, .p_callback = NULL, .p_context = NULL,

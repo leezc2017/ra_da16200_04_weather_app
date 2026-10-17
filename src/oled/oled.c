@@ -208,6 +208,38 @@ void OLED_ShowChinese(u8 x, u8 y, u8 no, u8 sizey)
 	}
 }
 
+/* 显示一个 16x16 字模(列主序: 前16字节在页y, 后16字节在页y+1)。
+ * 来自 GD32 参考(fd56536), 供 weather_font.h 的天气中文字模使用。 */
+void OLED_ShowChineseGlyph(u8 x, u8 y, const u8 *glyph)
+{
+	u8 i;
+
+	if (glyph == NULL)
+		return;
+
+	for (i = 0; i < 16; i++)
+	{
+		OLED_Set_Pos(x, y);
+		OLED_WR_Byte(glyph[i], OLED_DATA);
+		OLED_Set_Pos(x, y + 1);
+		OLED_WR_Byte(glyph[i + 16], OLED_DATA);
+		x++;
+	}
+}
+
+/* 显示一个 8px 字模(单页), 与 GD32 保持一致。 */
+void OLED_ShowChinese8Glyph(u8 x, u8 y, const u8 *glyph)
+{
+	u8 i;
+
+	if (glyph == NULL)
+		return;
+
+	OLED_Set_Pos(x, y);
+	for (i = 0; i < 8; i++)
+		OLED_WR_Byte(glyph[i], OLED_DATA);
+}
+
 // 显示图片
 // x,y:起点坐标
 // sizex,sizey:图片长宽

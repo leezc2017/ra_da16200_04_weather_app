@@ -128,10 +128,10 @@ at_result_t at_engine_poll(void);       /* 每 tick 调用，非阻塞 */
 
 ## 6. 显示与外设（已有现成资产：`RA4M2_100PIN_example\RA4M2OLED`）
 
-- **OLED 驱动直接复用**：`src/oled/oled.c/h + oledfont.h`（SSD1306 128x32，`OLED_ShowChar/ShowString/ShowBMP` 等 GD32 同款 API）+ `src/oled_port.c`（软 SPI 回调，**运行时 `R_IOPORT_PinCfg` 动态配引脚**）+ `src/gpio_spi/`。
-  - 示例固定接线：CLK=**P001**、DAT=**P000**、RES=**P003**、DC=**P007**、CS=**P014**（7PIN，软 SPI 100kHz）
-  - 关键收益：**运行时 PinCfg → 不需要在 e2studio FSP 配置器里重新生成 ra_gen**，与桥工程引脚（P410/P411）无冲突，纯命令行可完成；**接线已确认与示例一致**
-- ~~RTC~~：**用户已确认不需要**；主页显示 IP 定位城市、实时天气/温度/湿度/风速、今日高低温和时间，WiFi 页显示 SSID/IP/状态。当前 `WEATHER_UI_SERIAL_SIM=1` 时以四行串口文本模拟 128×32 OLED，并跳过 OLED 硬件初始化；真实 OLED 路径由该配置关闭后启用。时间来源见 §5 对时行
+- **OLED 驱动直接复用**：`src/oled/oled.c/h + oledfont.h`（SSD1306 128x32，`OLED_ShowChar/ShowString/ShowBMP` 等 GD32 同款 API）+ `src/oled_port.c`（软 SPI 回调；五个 pin 在 `configuration.xml`/`ra_gen/pin_data.c` 配为 GPIO 输出，并由 `oled_port_init()` 再初始化）+ `src/gpio_spi/`。
+  - 软 SPI 接线：CLK=**P001**、DAT=**P000**、RES=**P003**、DC=**P007**、CS=**P014**（7PIN，100 kHz）；物理排针对应需以当前 PCB/排针图核对。
+  - 当前已将这五个 pin 补入 RASC 配置；重新生成后应确认仍为 GPIO outputs。实体 OLED 是否响应仍须板上测量确认。
+  - ~~RTC~~：**用户已确认不需要**；主页显示 IP 定位城市、实时天气/温度/湿度/风速、今日高低温和时间，WiFi 页显示 SSID/IP/状态。当前 `WEATHER_UI_SERIAL_SIM=0`，启动时会调用 `oled_port_init()` 初始化实体 OLED；设为 `1` 可切换到四行串口模拟。时间来源见 §5 对时行
 - **按键：板上共 4 个（2 机械 + 2 触摸）**
   - 2 个机械键：`RA4M2GPIOINPUT` 示例读 **P005/P006**（极性/上拉实现时按原理图或实测确认）
   - 2 个触摸键：`RA4M2TOUCH` 示例使用 FSP CTSU + RM_TOUCH 中间件，电极为 TSCAP=P207、TS11=P415、TS12=P708；`button_status` bit0/bit1 对应两键

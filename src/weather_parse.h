@@ -19,6 +19,8 @@ typedef struct {
     int      low;           /* 今日最低温；未返回时为 -1 */
     uint8_t  daily_valid;   /* 今日预报是否成功解析 */
     char     update[24];    /* last_update: "2024-05-01T12:00:00+08:00" */
+    char     location[33];  /* results[0].location.name, API returned city
+                             * name (en: ASCII e.g. "Chifeng"); empty = none */
 } weather_data_t;
 
 /* 从 body 提取 results[0].now + last_update, 成功返回 0 */

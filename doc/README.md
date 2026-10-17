@@ -4,7 +4,7 @@
 
 本工程是 **RA4M2 + DA16200 天气显示站**（复刻 GD32VW553 版 `4.weather_app`），总体方案见根目录 `DESIGN.md`。
 
-- **当前状态（天气链路/串口 OLED 模拟）**：已实测 Wi-Fi、SNTP/AT+TIME、now/daily HTTP 200、JSON 解析和持续心跳；联网凭据和城市优先从 RA Data Flash 双槽记录加载，无有效记录时回退编译默认值。主页与 Wi-Fi 信息页通过 USB 串口输出 128×32 OLED 四行内容。真实 OLED 未连接时跳过 OLED 初始化。
+- **当前显示配置**：默认 `WEATHER_UI_SERIAL_SIM=0`，启用实体 SSD1306 OLED；设置为 `1` 可切回串口四行模拟。硬件软 SPI 使用 SCLK=P001、MOSI=P000、RES=P003、DC=P007、CS=P014。五个引脚已在 `configuration.xml` 和 `ra_gen/pin_data.c` 配置为 GPIO 输出高，并由 `oled_port_init()` 再次初始化。若屏幕仍无显示，需核对实际 OLED 排针标号、电源/地、逻辑电平、模块控制器及复位/时钟/数据波形；实体屏板级工作状态仍需实测确认。
 - **NTP 配置**：主服务器为 `ntp.aliyun.com`，备用 `pool.ntp.org`。模块返回 NWSNTP `OK` 后等待 8 秒，再查询 `AT+TIME` 验证；时间查询完成后开始天气 HTTP 请求。
 - **天气指标与按键**：now JSON 的可选 humidity/wind_speed 若缺失，会尝试使用 daily JSON 同名字段补齐；仍为 `--` 表示两次响应都没提供值。P005 短按在未联网/AT 忙时排队，联网后执行；P005 双击和 P006 单击翻页。CTSU TS11/TS12 的 FSP 6.6 QE Touch 文件和构建规则已接入，`make -B -j8 all` 可完整链接；触摸阈值及触摸事件仍未完成板上验收。
 - **板载 LED**：LED1/P045 联网中约 200 ms 节拍闪烁、连接成功常亮；LED2/P044 天气请求中闪烁、天气有效后常亮；LED3/P002 在联网/天气请求活动期间熄灭，空闲时慢速呼吸（约 2 秒周期）。GPIO 高电平点亮，固件运行时配置。

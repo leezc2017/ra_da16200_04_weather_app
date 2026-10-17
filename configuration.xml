@@ -343,6 +343,16 @@
       <configSetting altId="p005.gpio_mode.gpio_mode_in" configurationId="p005.gpio_mode"/>
       <configSetting altId="p006.input" configurationId="p006"/>
       <configSetting altId="p006.gpio_mode.gpio_mode_in" configurationId="p006.gpio_mode"/>
+      <configSetting altId="p000.output.high" configurationId="p000"/>
+      <configSetting altId="p000.gpio_mode.gpio_mode_out.high" configurationId="p000.gpio_mode"/>
+      <configSetting altId="p001.output.high" configurationId="p001"/>
+      <configSetting altId="p001.gpio_mode.gpio_mode_out.high" configurationId="p001.gpio_mode"/>
+      <configSetting altId="p003.output.high" configurationId="p003"/>
+      <configSetting altId="p003.gpio_mode.gpio_mode_out.high" configurationId="p003.gpio_mode"/>
+      <configSetting altId="p007.output.high" configurationId="p007"/>
+      <configSetting altId="p007.gpio_mode.gpio_mode_out.high" configurationId="p007.gpio_mode"/>
+      <configSetting altId="p014.output.high" configurationId="p014"/>
+      <configSetting altId="p014.gpio_mode.gpio_mode_out.high" configurationId="p014.gpio_mode"/>
       <configSetting altId="p108.debug0.swdio" configurationId="p108"/>
       <configSetting altId="p108.gpio_mode.gpio_mode_peripheral" configurationId="p108.gpio_mode"/>
       <configSetting altId="p109.sci9.txd" configurationId="p109"/>

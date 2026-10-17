@@ -18,9 +18,11 @@
 #define SET      (BSP_IO_LEVEL_HIGH)
 #define RESET    (BSP_IO_LEVEL_LOW)
 
-/* ============ 7PIN OLED 引脚 (软SPI, 与 .pincfg / ra_gen/pin_data.c 中配置的 GPIO 一致) ====
- * 本工程只用到 5 根: CS/DC/RES/CLK/DAT; 模块上的 GND/VCC/BL 不由 MCU 控制, P00_15 虽在
- * pin_data.c 里配成输出但未使用。 */
+/* ============ 7-pin OLED board wiring (soft SPI) ============
+ * MCU signals used here: SCLK=P001, MOSI=P000, RES=P003, DC=P007, CS=P014.
+ * GND/VCC/BL are board power/backlight connections, not MCU GPIO signals.
+ * configuration.xml/ra_gen pin_data.c configure all five as GPIO outputs.
+ * oled_port_init() repeats the setting and establishes idle-high levels. */
 #define OLED_CLK_PIN     BSP_IO_PORT_00_PIN_01          /* D0 / SCLK */
 #define OLED_DAT_PIN     BSP_IO_PORT_00_PIN_00          /* D1 / MOSI  */
 #define OLED_RES_PIN     BSP_IO_PORT_00_PIN_03          /* RES        */
@@ -91,9 +93,8 @@ static int oled_bus_write(void *data, int len)
 }
 
 /* ---------------- 初始化 ---------------- */
-/* 把引脚强制配成推挽输出并预置为高电平。
- * FSP 的 g_bsp_pin_cfg 已在 R_BSP_WarmStart()->R_IOPORT_Open() 中配过一次,
- * 这里再显式配一次, 避免依赖启动顺序, 同时把输出电平拉到空闲态。 */
+/* Set GPIO output direction and idle-high level at runtime. Keep the same pins
+ * configured as GPIO outputs in RASC so their power-on state is deterministic. */
 static void oled_pin_out(uint32_t pin)
 {
     R_IOPORT_PinCfg(&g_ioport_ctrl, pin,

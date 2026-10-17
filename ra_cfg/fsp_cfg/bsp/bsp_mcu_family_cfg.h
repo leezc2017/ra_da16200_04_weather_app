@@ -96,7 +96,7 @@ extern "C" {
 #define BSP_TZ_CFG_PSARC (\
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 0) /* CAC */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 1) /* CRC */ | \
-            (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 3) /* CTSU */ | \
+            (((1 > 0) ? 0U : 1U) << 3) /* CTSU */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 8) /* SSIE0 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 12) /* SDHI0 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 13) /* DOC */ | \

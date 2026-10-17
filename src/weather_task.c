@@ -39,6 +39,10 @@
 #include "provisioning_portal.h"
 #include "hal_data.h"
 
+/* daily 数据缺失时的高频重试（不再等满一个 refresh 周期） */
+#define WEATHER_DAILY_RETRY        3U      /* 每轮最多补抓次数 */
+#define WEATHER_DAILY_RETRY_GAP_MS 30000U  /* 两次补抓间隔 */
+
 /** 命令归属：决定引擎结果交给谁处理 */
 typedef enum {
     CMD_NONE = 0,      /**< 无命令在途 */
@@ -202,6 +206,10 @@ static struct {
     weather_data_t wx;
     bool           wx_valid;
     uint32_t       wx_age_ms;
+    /* daily data missing -> limited quick retries (user issue: TODAY/wind
+     * rows stayed empty until the next full refresh). */
+    uint32_t       daily_retry_due_ms;
+    uint8_t        daily_retry_left;
 
     /* UI */
     uint8_t  page;              /**< 0=主页 1=WiFi信息 */
@@ -641,6 +649,43 @@ static bool parse_ip (const char * line, char * out, uint16_t size)
 }
 
 /**
+ * @brief 从 +WFJAP:1 行里取出真实的 SSID
+ *
+ * 实测格式: +WFJAP:1,'CMCC-xxxx',192.168.1.2 —— SSID 是第一个引号对里的字段。
+ * 模块实际加入哪一路, 就把哪一路回填进 s.ssid: 修复"联网中/失败页 SSID 显示
+ * 问号"(配置还没记住时, 屏幕上根本没有可显示的 SSID)。
+ *
+ * @param line 输入行（不含 CRLF）
+ * @param out  输出缓冲
+ * @param size 缓冲大小
+ * @return true=取到非空 SSID
+ */
+static bool parse_ssid (const char * line, char * out, uint16_t size)
+{
+    const char * p;
+    uint16_t k = 0U;
+
+    if ((NULL == line) || (NULL == out) || (size < 2U))
+    {
+        return false;
+    }
+
+    p = strchr(line, '\'');
+    if (NULL == p)
+    {
+        return false;
+    }
+    p++;
+    while ((*p != '\0') && (*p != '\'') && (*p != '\r') && (*p != '\n') &&
+           (k < (uint16_t)(size - 1U)))
+    {
+        out[k++] = *p++;
+    }
+    out[k] = '\0';
+    return (0U != k);
+}
+
+/**
  * @brief 投递一条 AT 命令并登记归属
  *
  * 仅在 at_engine_idle() 为 true 时可成功（单飞行约束）。
@@ -1030,6 +1075,7 @@ static bool fetch_weather_start (void)
          * "抓取有问题"。屏幕上必须能看出"还在飞"和"等了几秒"。 */
         s.fetch_t0  = at_engine_now_ms();
         s.fetch_sec = 0xFFFFFFFFU;    /* 强制首帧就重绘 */
+        s.daily_retry_left = WEATHER_DAILY_RETRY;
         s.ui_dirty  = true;
         return true;
     }
@@ -1063,6 +1109,32 @@ static bool fetch_weather_now_done (void)
                (unsigned)s_wxr.body_len);
         s.ui_dirty = true;
         return false;
+    }
+
+    /* now.json 整体覆盖 s.wx 时会把上一轮的 daily(高低温)与短报文里缺失的
+     * 湿度/风速一并清掉 —— 表现为"今日温度/风速有时不显示, 要刷新一次"。
+     * 覆盖前把上一轮的可选字段合并回来(数据略旧好过整行空白)。 */
+    if (s.wx_valid)
+    {
+        if (s.wx.daily_valid)
+        {
+            parsed.daily_valid = 1U;
+            parsed.low  = s.wx.low;
+            parsed.high = s.wx.high;
+        }
+        if ((parsed.humidity < 0) && (s.wx.humidity >= 0))
+        {
+            parsed.humidity = s.wx.humidity;
+        }
+        if ((parsed.wind_speed < 0) && (s.wx.wind_speed >= 0))
+        {
+            parsed.wind_speed = s.wx.wind_speed;
+        }
+        if ((parsed.location[0] == '\0') && (s.wx.location[0] != '\0'))
+        {
+            strncpy(parsed.location, s.wx.location, sizeof(parsed.location) - 1);
+            parsed.location[sizeof(parsed.location) - 1] = '\0';
+        }
     }
 
     s.wx = parsed;
@@ -1388,8 +1460,16 @@ static void ui_refresh (void)
     if (s.provision_active)
     {
         ui_main_view_t mv;
+        const char *pcity = (s.provision_city[0] != '\0') ? s.provision_city
+                                                          : s.city;
+
         memset(&mv, 0, sizeof(mv));
         snprintf(mv.ssid, sizeof(mv.ssid), "%s", s.ssid);
+        /* Show the configured (portal-entered) city on the provisioning
+         * page title row; skip the "ip" compile default. */
+        if ((pcity[0] != '\0') && (0 != strcmp(pcity, "ip")) &&
+            (0 != strcmp(pcity, "IP")))
+            snprintf(mv.city, sizeof(mv.city), "%.15s", pcity);
         if (s.provision_step >= PROV_STEP_STA_TEARDOWN)
             mv.provisioning = 2U;
         else if ((s.provision_step >= PROV_STEP_SERVING) &&
@@ -1402,8 +1482,14 @@ static void ui_refresh (void)
     if (!s.boot_sta_ready && (WIFI_STAT_FAIL != s.status))
     {
         ui_main_view_t mv;
+        const char *pcity = (s.provision_city[0] != '\0') ? s.provision_city
+                                                          : s.city;
+
         memset(&mv, 0, sizeof(mv));
         snprintf(mv.ssid, sizeof(mv.ssid), "%s", s.ssid);
+        if ((pcity[0] != '\0') && (0 != strcmp(pcity, "ip")) &&
+            (0 != strcmp(pcity, "IP")))
+            snprintf(mv.city, sizeof(mv.city), "%.15s", pcity);
         mv.provisioning = 3U;
         ui_main_page(&mv, WIFI_STAT_PROVISIONING);
         return;
@@ -1421,10 +1507,37 @@ static void ui_refresh (void)
         snprintf(mv.city, sizeof(mv.city), "IP");
         if (s.city[0] != '\0')
             snprintf(mv.city, sizeof(mv.city), "%.15s", s.city);
+        /* API 解析出的实际城市名优先: 即使走 IP 定位也显示真实城市 */
+        if (s.wx_valid && (s.wx.location[0] != '\0'))
+            snprintf(mv.city, sizeof(mv.city), "%.32s", s.wx.location);
+        /* GD32-latest UI contract: weather_code=-1 means "no data" (memset
+         * would leave 0 = "sunny", so initialize explicitly). */
+        mv.weather_code = -1;
+        /* Derive activity for the GD32-latest UI pages. Unlike the GD32
+         * state machine (which jumps to FETCHING on every re-fetch), while
+         * valid data is already displayed we keep SUCCESS so the periodic
+         * refresh does not blank the screen into the "fetching" page. */
+        if (s.wx_valid)
+            mv.activity = WEATHER_ACT_SUCCESS;
+        else if (weather_http_busy())
+            mv.activity = WEATHER_ACT_FETCHING;
+        else if (s.status == WIFI_STAT_CONNECTED)
+            mv.activity = WEATHER_ACT_FAILED;   /* conclusion lives in [WX-RESULT] log */
+        else if (s.connect_t0 != 0U)
+            mv.activity = WEATHER_ACT_WIFI_CONNECTING;
+        else
+            mv.activity = WEATHER_ACT_IDLE;
 
         if (s.wx_valid)
         {
-            snprintf(mv.temp_str, sizeof(mv.temp_str), "%dC", s.wx.temperature);
+            snprintf(mv.temp_str, sizeof(mv.temp_str), "%d", s.wx.temperature);
+            /* The degree glyph is drawn by the UI after temp_str, so the
+             * string itself must not carry a trailing "C". */
+            if (s.wx.feels_like >= 0)
+            {
+                snprintf(mv.feels_like_str, sizeof(mv.feels_like_str), "%d",
+                         s.wx.feels_like);
+            }
             /* 心知中文 API 文案是 UTF-8，而 OLED 点阵字模按
              * GB2312/GBK 索引的（oledfont.h 的 Hzk[]）。把 UTF-8 字节直接喂
              * OLED_ShowString 会按 GBK 拆成两个错字 —— 这不是本工程的移植
@@ -1461,7 +1574,11 @@ static void ui_refresh (void)
             {
                 snprintf(mv.low_str, sizeof(mv.low_str), "%d", s.wx.low);
                 snprintf(mv.high_str, sizeof(mv.high_str), "%d", s.wx.high);
+                /* GD32 format: "low/high"; the UI appends the degree glyph. */
+                snprintf(mv.range_str, sizeof(mv.range_str), "%d/%d",
+                         s.wx.low, s.wx.high);
             }
+            mv.weather_code = s.wx.code;
             mv.icon    = (uint8_t)weather_icon_of(s.wx.code);
             mv.offline = (s.status != WIFI_STAT_CONNECTED) ? 1U : 0U;
         }
@@ -1985,6 +2102,8 @@ static void provision_poll(uint32_t now)
 
     if (s.provision_step == PROV_STEP_STA_JOIN)
     {
+        char urc[AT_URC_LINE];
+
         if (!s.provision_connect_accepted)
         {
             char command[160];
@@ -1995,8 +2114,11 @@ static void provision_poll(uint32_t now)
                 s.provision_deadline = now + 30000U;
             }
         }
-        else if (at_engine_urc_take("+WFJAP:1"))
+        else if (at_engine_urc_get("+WFJAP:1", urc, sizeof(urc)))
         {
+            /* Keep s.ssid in sync with what the module actually joined, so
+             * the provisioning/connecting UI shows the true SSID. */
+            (void)parse_ssid(urc, s.ssid, sizeof(s.ssid));
             s.provision_sta_connected = true;
         }
 
@@ -2262,7 +2384,18 @@ void weather_task_poll (void)
         /* 2a. 快速路径：+WFJAP:1 自带 IP，一步到位（模块刚上电时会自发这条） */
         if (at_engine_urc_get("+WFJAP:1", urc, sizeof(urc)))
         {
+            char joined[33];
+
             printf("[wx] +WFJAP:1 urc='%s'\r\n", urc);
+            /* 模块实际加入的 SSID 回填 s.ssid: 修"联网中/失败页 SSID 显示
+             * 问号"——屏幕上要显示的就是真实加入的这一路。 */
+            if (parse_ssid(urc, joined, sizeof(joined)) &&
+                (0 != strcmp(joined, s.ssid)))
+            {
+                snprintf(s.ssid, sizeof(s.ssid), "%s", joined);
+                s.ui_dirty = true;
+                printf("[wx] joined SSID '%s'\r\n", joined);
+            }
             if (parse_ip(urc, s.ip, sizeof(s.ip)))
             {
                 mark_connected("+WFJAP:1 URC");
@@ -2462,6 +2595,19 @@ void weather_task_poll (void)
             if (fetch_weather_start())
             {
                 s.wx_age_ms = 0U;
+            }
+        }
+        /* 4b2. TODAY/wind 行缺失 -> 限次快速补抓, 不等满 refresh 周期 */
+        else if (s.wx_valid && (0U == s.wx.daily_valid) &&
+                 (s.daily_retry_left > 0U) &&
+                 ((int32_t)(now - s.daily_retry_due_ms) >= 0))
+        {
+            if (fetch_weather_start())
+            {
+                s.daily_retry_left--;
+                s.daily_retry_due_ms = now + WEATHER_DAILY_RETRY_GAP_MS;
+                printf("[wx] daily missing, retry (%u left)\r\n",
+                       (unsigned)s.daily_retry_left);
             }
         }
         /* 4c. 联网后初始化链路: 查 IP -> 设时区 -> SNTP */

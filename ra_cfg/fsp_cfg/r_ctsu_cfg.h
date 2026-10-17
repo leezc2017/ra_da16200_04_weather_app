@@ -10,7 +10,7 @@
 #define CTSU_CFG_INT_PRIORITY_LEVEL               (12)
 #define CTSU_CFG_AUTO_JUDGE_ENABLE                (0)
 #ifndef QE_TOUCH_CONFIGURATION
-#define CTSU_CFG_NUM_SELF_ELEMENTS                (2)
+#define CTSU_CFG_NUM_SELF_ELEMENTS                (1)
 #define CTSU_CFG_NUM_MUTUAL_ELEMENTS              (0)
 #if (CTSU_CFG_AUTO_JUDGE_ENABLE == 1)
                  #define CTSU_CFG_MAJORITY_MODE                       (2)
@@ -24,9 +24,9 @@
 #define CTSU_CFG_AUTO_CORRECTION_ENABLE              (0)
 #endif
 #define CTSU_CFG_LOW_VOLTAGE_MODE                 (0)
-#define CTSU_CFG_PCLK_DIVISION                    (1)
-#define CTSU_CFG_TSCAP_PORT                       (0x0207)
-#define CTSU_CFG_VCC_MV                           (3300)
+#define CTSU_CFG_PCLK_DIVISION                    (0)
+#define CTSU_CFG_TSCAP_PORT                       (0xFFFF)
+#define CTSU_CFG_VCC_MV                           (5000)
 #define CTSU_CFG_DIAG_SUPPORT_ENABLE              (0)
 #if (BSP_FEATURE_CTSU_VERSION == 2)
                  #define CTSU_CFG_NUM_CFC                          (0)

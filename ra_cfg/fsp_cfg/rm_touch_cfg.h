@@ -10,7 +10,7 @@
 #define TOUCH_CFG_UART_TUNING_SUPPORT         (0)
 #define TOUCH_CFG_CHATTERING_SUPPRESSION_TYPE (0)
 #ifndef QE_TOUCH_CONFIGURATION
-#define TOUCH_CFG_NUM_BUTTONS             (2)
+#define TOUCH_CFG_NUM_BUTTONS             (1)
 #define TOUCH_CFG_NUM_SLIDERS             (0)
 #define TOUCH_CFG_NUM_WHEELS              (0)
 #if (BSP_FEATURE_CTSU_VERSION == 2)
