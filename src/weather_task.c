@@ -1490,6 +1490,10 @@ static void ui_refresh (void)
         uint8_t fc, fi;
 
         memset(&fv, 0, sizeof(fv));
+        time_str_get(time5, sizeof(time5));
+        snprintf(fv.time_str, sizeof(fv.time_str), "%s", time5);
+        if (s.wx_valid)
+            snprintf(fv.temp_str, sizeof(fv.temp_str), "%d", s.wx.temperature);
         if (s.wx_valid)
         {
             fc = (s.wx.f_count > 3U) ? 3U : s.wx.f_count;

@@ -5,7 +5,7 @@
  *
  * Main page row0 (16px): city name (CamelCase API city) + Chinese weather
  * glyphs selected by the Seniverse code + temperature + bitmap degree sign.
- * Rows2/3 (one 16px row): enlarged "风速 xx 湿度 xx" (16px CN glyphs, no
+ * Rows2/3 (one 16px row): enlarged "风�?xx 湿度 xx" (16px CN glyphs, no
  * units; the today hi/lo row was removed per user review). Status pages use
  * Chinese 16px glyphs; provisioning/connecting/failed pages show the SSID
  * being connected plus the configured city. See weather_ui.h for the
@@ -188,33 +188,51 @@ void ui_init(void)
 
 void ui_forecast_page(const ui_forecast_view_t *v)
 {
-    static const weather_cn8_glyph_t day_glyph[3] = {
-        WX_CN8_JIN, WX_CN8_MING, WX_CN8_HOU,
-    };
-    u8 i;
+    /* 2026-10-17 redesign (2nd round): no forecast/Hi-Lo header anymore.
+     * rows 0-1 = 16px current time, row2 = 8px current temperature,
+     * row3 = ming/hou lo/hi per user sketch. */
+    const char *time_s = v->time_str[0] ? v->time_str : "--:--";
+    const char *temp_s = v->temp_str[0] ? v->temp_str : "--";
+    const char *tom    = v->row_str[1][0] ? v->row_str[1] : "--";
+    const char *dat    = v->row_str[2][0] ? v->row_str[2] : "--";
+    u8 x;
 
     OLED_Clear();
-    printf("[oled] forecast count=%u\r\n", (unsigned)v->count);
-    /* Header row (8px): forecast + "day hi/lo" column hint. */
-    oled_cn8_show(0, 0, WX_CN8_YU);   /* pre  */
-    oled_cn8_show(8, 0, WX_CN8_BAO);  /* report */
-    OLED_ShowString(18, 0, (u8 *)"Today Hi/Lo", 8);
-    printf("[oled] L0=forecast hi/lo\r\n");
+    printf("[oled] forecast time=%s temp=%s tom=%s dat=%s\r\n",
+           time_s, temp_s, tom, dat);
 
-    for (i = 0; i < 3U; i++) {
-        const char *val = v->row_str[i][0] ? v->row_str[i] : "--";
-        u8 x;
+    /* rows 0-1: current time in 16px digits (5 chars = 40 px). */
+    OLED_ShowString(0, 0, (u8 *)time_s, 16);
+    printf("[oled] L0-1=%s\r\n", time_s);
 
-        /* day label glyph: today/morrow/after */
-        oled_cn8_show(0, (u8)(i + 1U), day_glyph[i]);
-        OLED_ShowString(10, (u8)(i + 1U), (u8 *)val, 8);
-        printf("[oled] L%u=%s\r\n", (unsigned)(i + 1U), val);
+    /* row2: current temperature (UI paints the degree bitmap itself). */
+    OLED_ShowString(0, 2, (u8 *)temp_s, 8);
+    x = (u8)((u16)strlen(temp_s) * 6U);
+    if (x <= 118U) {
+        OLED_DrawBMP(x, 2, 8, 8, (u8 *)BMP_DEGREE);
+    }
+    printf("[oled] L2=%s\r\n", temp_s);
 
-        x = (u8)(10U + strlen(val) * 6U);
+    /* row3: tomorrow lo/hi, then day-after lo/hi, one 8px row. */
+    oled_cn8_show(0, 3, WX_CN8_MING);
+    OLED_ShowString(10, 3, (u8 *)tom, 8);
+    x = (u8)(10U + strlen(tom) * 6U);
+    if (x <= 118U) {
+        OLED_DrawBMP(x, 3, 8, 8, (u8 *)BMP_DEGREE);
+        x = (u8)(x + 10U);
+    }
+    if (x <= 116U) {
+        oled_cn8_show(x, 3, WX_CN8_HOU);
+        x = (u8)(x + 10U);
+    }
+    if (x <= 116U) {
+        OLED_ShowString(x, 3, (u8 *)dat, 8);
+        x = (u8)(x + strlen(dat) * 6U);
         if (x <= 118U) {
-            OLED_DrawBMP(x, (u8)(i + 1U), 8, 8, (u8 *)BMP_DEGREE);
+            OLED_DrawBMP(x, 3, 8, 8, (u8 *)BMP_DEGREE);
         }
     }
+    printf("[oled] L3=%s/%s\r\n", tom, dat);
 }
 
 void ui_boot_splash(void)

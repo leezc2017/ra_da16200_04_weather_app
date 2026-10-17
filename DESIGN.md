@@ -321,6 +321,12 @@ OLED_Set_Pos(x, y):  0xb0 + y     // y 是【页号 0~3】，不是像素纵坐�
 - **联网中/失败页**：第 2 行显示正在连接的 SSID（`+WFJAP:1` URC 里的真实 SSID 会回填 `s.ssid`，新 `parse_ssid()`）；第 3 行显示 **FLASH 中保存的城市**（`s.city`，`[cfg] loaded` 日志会带 `city='...'`）。若 FLASH 记录没存城市会显示 IP——需要重新配网一次把 CITY 填上（portal 表单含 city 字段）。
 - **新增预报页（第 2 页）**：8px 标题「预报 Today Hi/Lo」+ 3 行「今/明/后 + low/high + ℃」。数据来自 `daily.json?days=3`，解析层新增 `f_low[3]/f_high[3]/f_count`；**免费 key 上限 3 天**（实测请求 days=4 也只返回今天+未来两天，做不到 4 天）。
 
+**2026-10-17 界面改版记录 · 第二轮（板测反馈修改）**
+- **16px 字模管线修正**：主页「风速/湿度」大行动用户仍读成"预湿"——根因是我用 SimSun 原生 16px 位图生成，笔画太细、和 GD32 原有粗壮字模风格不搭。速/湿/度/预/报 五个 16px 字模改为 **32px 抗锯齿光栅 → 2:1 OR 降采样** 重新生成（与 8px 字库同管线），笔画变粗、五个字形已在主机侧逐行解码核对。
+- **预报页重画（用户新版式）**：第 0–1 行 = **16px 当前时间**（`HH:MM`，未同步时 `--:--`）；第 2 行（8px）= **当前温度 + ℃ 度符**；第 3 行（8px）= **明 lo/hi + 后 lo/hi**（各自带 ℃）。原「预报 Today Hi/Lo」标题和「今」行删除（"不用提示高低温度"；当天温度即顶部当前温度）。`ui_forecast_view_t` 新增 `time_str/temp_str`，`weather_task` 页 2 分发处填充；串口行改为 `[oled] forecast time=.. temp=.. tom=.. dat=..`。今（JIN）与预/报 8px 字模保留在表中备用。
+- **CITY 仍显示 IP 的结论**：代码核查 `provisioning` POST 解析（city 是必填字段）与 `weather_cfg_restore_defaults()`（先 `weather_cfg_load()`、仅全无记录才回默认）均无丢失路径；唯一解释是**当前 FLASH 记录里城市为空**（上次配网时 city 留空，表单允许空值）。处理：重新配网一次并填写 CITY（pinyin，如 `baoding`）；开机日志 `[cfg] loaded RA Data Flash settings (... city='...')` 可直接核实存没存上。
+
+
 ### 阶段4：SoftAP 网页配网与 RA Data Flash 设置持久化（核心链路有实机日志，完整验收待完成）
 - **启动模式收敛**：最新代码在 AT 自检后先执行 `AT+WFTAP` → `AT+WFMODE=0` → `AT+RESTART`，并等待 `+INIT:DONE,0` 才进入联网阶梯；若仍处于 AP 模式会有限重试。配网入口仍按请求切换到 SoftAP。用户最新 RFP 烧写后确认启动模式行为正常。
 - **联网状态监测**：CONNECTED 后以 5 秒间隔在 AT 空闲时发送 `AT+WFSTA`，并独立消费 `+WFJAP:0` / `+WFSTA:0` URC；断线时清空旧 IP、回 CONNECTING 并重启阶梯，LED1 随 status 变为闪烁。正常健康轮询不触发 OLED 重绘，只有状态或显示数据变化设置 `ui_dirty`。
