@@ -21,6 +21,9 @@ typedef struct {
     char     update[24];    /* last_update: "2024-05-01T12:00:00+08:00" */
     char     location[33];  /* results[0].location.name, API returned city
                              * name (en: ASCII e.g. "Chifeng"); empty = none */
+    int      f_high[3];     /* 每天最高温 °C (index0=今天; i<f_count 才有效) */
+    int      f_low[3];      /* 每天最低温 °C */
+    uint8_t  f_count;       /* 成功解析的天数(含当天), <=3; 0=无预报数据 */
 } weather_data_t;
 
 /* 从 body 提取 results[0].now + last_update, 成功返回 0 */

@@ -813,8 +813,8 @@ static bool weather_cfg_load(void)
     snprintf(s.provision_password, sizeof(s.provision_password), "%s", selected->password);
     snprintf(s.city, sizeof(s.city), "%s", selected->city);
     s.provision_city_valid = (selected->city[0] != '\0');
-    printf("[cfg] loaded RA Data Flash settings (sequence=%lu)\r\n",
-           (unsigned long)selected->sequence);
+    printf("[cfg] loaded RA Data Flash settings (seq=%lu, city='%s')\r\n",
+           (unsigned long)selected->sequence, selected->city);
     return true;
 }
 
@@ -1026,7 +1026,7 @@ static void build_url (char * buf, uint16_t size, bool daily)
 {
     if (daily) {
         snprintf(buf, size,
-                 "http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=%s&unit=c&start=0&days=1",
+                 "http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=%s&unit=c&start=0&days=3",
                  WEATHER_API_KEY,
                   (s.city[0] != '\0') ? s.city : (('\0' != WEATHER_CITY[0]) ? WEATHER_CITY : "ip"),
                  WEATHER_LANG);
@@ -1460,16 +1460,9 @@ static void ui_refresh (void)
     if (s.provision_active)
     {
         ui_main_view_t mv;
-        const char *pcity = (s.provision_city[0] != '\0') ? s.provision_city
-                                                          : s.city;
 
         memset(&mv, 0, sizeof(mv));
         snprintf(mv.ssid, sizeof(mv.ssid), "%s", s.ssid);
-        /* Show the configured (portal-entered) city on the provisioning
-         * page title row; skip the "ip" compile default. */
-        if ((pcity[0] != '\0') && (0 != strcmp(pcity, "ip")) &&
-            (0 != strcmp(pcity, "IP")))
-            snprintf(mv.city, sizeof(mv.city), "%.15s", pcity);
         if (s.provision_step >= PROV_STEP_STA_TEARDOWN)
             mv.provisioning = 2U;
         else if ((s.provision_step >= PROV_STEP_SERVING) &&
@@ -1482,20 +1475,56 @@ static void ui_refresh (void)
     if (!s.boot_sta_ready && (WIFI_STAT_FAIL != s.status))
     {
         ui_main_view_t mv;
-        const char *pcity = (s.provision_city[0] != '\0') ? s.provision_city
-                                                          : s.city;
 
         memset(&mv, 0, sizeof(mv));
         snprintf(mv.ssid, sizeof(mv.ssid), "%s", s.ssid);
-        if ((pcity[0] != '\0') && (0 != strcmp(pcity, "ip")) &&
-            (0 != strcmp(pcity, "IP")))
-            snprintf(mv.city, sizeof(mv.city), "%.15s", pcity);
         mv.provisioning = 3U;
         ui_main_page(&mv, WIFI_STAT_PROVISIONING);
         return;
     }
 
-    if (0U == s.page)
+    if (2U == s.page)
+    {
+        /* 预报页: 今天 + 未来两天 (免费版 daily.json 上限 3 天)。 */
+        ui_forecast_view_t fv;
+        uint8_t fc, fi;
+
+        memset(&fv, 0, sizeof(fv));
+        if (s.wx_valid)
+        {
+            fc = (s.wx.f_count > 3U) ? 3U : s.wx.f_count;
+            fv.count = fc;
+            for (fi = 0U; fi < 3U; fi++)
+            {
+                if (fi < fv.count)
+                {
+                    snprintf(fv.row_str[fi], sizeof(fv.row_str[0]),
+                             "%d/%d", s.wx.f_low[fi], s.wx.f_high[fi]);
+                }
+                else
+                {
+                    snprintf(fv.row_str[fi], sizeof(fv.row_str[0]), "--");
+                }
+            }
+        }
+        ui_forecast_page(&fv);
+        return;
+    }
+
+    if (1U == s.page)
+    {
+        ui_wifi_view_t wv;
+
+        memset(&wv, 0, sizeof(wv));
+        wv.ssid  = (s.ssid[0] != '\0') ? s.ssid : WEATHER_DEFAULT_SSID;
+        wv.ip    = s.ip;
+        wv.fails = s.fails;
+        wv.page  = s.page;
+        ui_wifi_page(&wv, s.status);
+        return;
+    }
+
+    /* s.page == 0: 主页 (天气 + 城市) */
     {
         ui_main_view_t mv;
 
@@ -1616,17 +1645,6 @@ static void ui_refresh (void)
             mv.icon = 0xFFU;
         }
         ui_main_page(&mv, s.status);
-    }
-    else
-    {
-        ui_wifi_view_t wv;
-
-        memset(&wv, 0, sizeof(wv));
-        wv.ssid  = (s.ssid[0] != '\0') ? s.ssid : WEATHER_DEFAULT_SSID;
-        wv.ip    = s.ip;
-        wv.fails = s.fails;
-        wv.page  = s.page;
-        ui_wifi_page(&wv, s.status);
     }
 }
 
@@ -2308,7 +2326,7 @@ void weather_task_poll (void)
             }
             else
             {
-                s.page ^= 1U;
+                s.page = (uint8_t)((s.page + 1U) % 3U);  /* 0主/1WiFi/2预报 */
                 printf("[wx] key%u: click -> page %u\r\n",
                        (unsigned)id, (unsigned)s.page);
                 s.ui_dirty = true;
@@ -2338,7 +2356,7 @@ void weather_task_poll (void)
                 break;
 
             case KEY_EVT_DOUBLE:
-                s.page ^= 1U;
+                s.page = (uint8_t)((s.page + 1U) % 3U);  /* 0主/1WiFi/2预报 */
                 printf("[wx] key%u: double -> page %u\r\n",
                        (unsigned)id, (unsigned)s.page);
                 s.ui_dirty = true;

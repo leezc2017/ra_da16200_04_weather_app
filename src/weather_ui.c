@@ -96,6 +96,14 @@ static void oled_cn_show(u8 x, u8 y, weather_cn_glyph_t glyph)
     }
 }
 
+/* helper: render one 8x8 CN glyph from weather_cn8_font (forecast page) */
+static void oled_cn8_show(u8 x, u8 y, weather_cn8_glyph_t glyph)
+{
+    if (glyph < WX_CN8_MAX) {
+        OLED_ShowChinese8Glyph(x, y, weather_cn8_font[glyph]);
+    }
+}
+
 static void oled_cn_sequence(u8 x, u8 y,
                              const weather_cn_glyph_t *glyphs, u8 count)
 {
@@ -178,6 +186,37 @@ void ui_init(void)
     OLED_Clear();
 }
 
+void ui_forecast_page(const ui_forecast_view_t *v)
+{
+    static const weather_cn8_glyph_t day_glyph[3] = {
+        WX_CN8_JIN, WX_CN8_MING, WX_CN8_HOU,
+    };
+    u8 i;
+
+    OLED_Clear();
+    printf("[oled] forecast count=%u\r\n", (unsigned)v->count);
+    /* Header row (8px): forecast + "day hi/lo" column hint. */
+    oled_cn8_show(0, 0, WX_CN8_YU);   /* pre  */
+    oled_cn8_show(8, 0, WX_CN8_BAO);  /* report */
+    OLED_ShowString(18, 0, (u8 *)"Today Hi/Lo", 8);
+    printf("[oled] L0=forecast hi/lo\r\n");
+
+    for (i = 0; i < 3U; i++) {
+        const char *val = v->row_str[i][0] ? v->row_str[i] : "--";
+        u8 x;
+
+        /* day label glyph: today/morrow/after */
+        oled_cn8_show(0, (u8)(i + 1U), day_glyph[i]);
+        OLED_ShowString(10, (u8)(i + 1U), (u8 *)val, 8);
+        printf("[oled] L%u=%s\r\n", (unsigned)(i + 1U), val);
+
+        x = (u8)(10U + strlen(val) * 6U);
+        if (x <= 118U) {
+            OLED_DrawBMP(x, (u8)(i + 1U), 8, 8, (u8 *)BMP_DEGREE);
+        }
+    }
+}
+
 void ui_boot_splash(void)
 {
     printf("[oled] splash: Lee Weather App\r\n");
@@ -197,35 +236,28 @@ void ui_main_page(const ui_main_view_t *v, wifi_status_t st)
     switch (st) {
     case WIFI_STAT_PROVISIONING:
         s_blink++;
-        printf("[oled] main status=provisioning (%u) city=%s\r\n",
-               (unsigned)v->provisioning,
-               v->city[0] ? v->city : "(unset)");
-        printf("[oled] L0=WiFi Config%s\r\n", (s_blink & 1) ? " *" : "");
-        printf("[oled] L2=SSID:%.16s\r\n",
-               v->ssid[0] ? v->ssid : "(unset)");
+        printf("[oled] main status=provisioning (%u) ap=leeWethWifi\r\n",
+               (unsigned)v->provisioning);
+        printf("[oled] L0=WiFi%s\r\n", (s_blink & 1) ? " *" : "");
+        printf("[oled] L2=AP:leeWethWifi (fixed)\r\n");
         printf("[oled] L3=open 192.168.1.100:8080\r\n");
         OLED_Clear();
-        /* 16px title lives on pages 0-1 ONLY, x0..63. The free right half
-         * shows the configured city (16px, up to 7 ASCII chars); the blink
-         * mark moved to the far right of the portal row (info rows start
-         * at page 2 -- no overlap with the tall glyphs). */
+        /* 16px title lives on pages 0-1 ONLY, x0..63; blink mark in the
+         * free right half. Info rows start at page 2 -- no overlap with
+         * the tall glyphs (GD32 original crammed SSID at page 1, which
+         * erased the bottom half of the 16px title). */
         OLED_ShowString(0, 0, (u8 *)"WiFi", 16);
         oled_cn_show(32, 0, WX_CN_PEI);
         oled_cn_show(48, 0, WX_CN_WANG);
-        if (v->city[0] != '\0') {
-            city_display_name(v->city, display_city, sizeof(display_city));
-            snprintf(line, sizeof(line), "%.7s", display_city);
-            OLED_ShowString(64, 0, (u8 *)line, 16);
-            printf("[oled] L0R=%s\r\n", display_city);
+        if (s_blink & 1) {
+            OLED_ShowString(64, 0, (u8 *)"*", 16);
         }
-        snprintf(line, sizeof(line), "SSID:%.16s",
-                 v->ssid[0] ? v->ssid : "(unset)");
-        OLED_ShowString(0, 2, (u8 *)line, 8);
+        /* User decision 2026-10-17: the FIRST page must always show the
+         * fixed SoftAP name (what the phone joins), NOT the saved home
+         * SSID. The home SSID shows on the connecting page instead. */
+        OLED_ShowString(0, 2, (u8 *)"AP:leeWethWifi", 8);
         /* Port 80 belongs to the DA16200 LWIP page; portal serves on 8080. */
         OLED_ShowString(0, 3, (u8 *)"192.168.1.100:8080", 8);
-        if (s_blink & 1) {
-            OLED_ShowString(120, 3, (u8 *)"*", 8);
-        }
         return;
     case WIFI_STAT_CONNECTING:
         s_blink++;

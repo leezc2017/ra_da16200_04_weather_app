@@ -124,6 +124,27 @@ int weather_parse_daily(const char *body, weather_data_t *out)
         if (!cJSON_IsArray(daily) || cJSON_GetArraySize(daily) < 1) {
             break;
         }
+        /* 逐天提取最高/最低温。免费版接口上限 3 天(请求 days=4 也只回 3 条),
+         * index 0=今天。成功解出 high+low 的天计入 f_count。 */
+        {
+            int n = cJSON_GetArraySize(daily);
+            int di;
+            if (n > 3) n = 3;
+            out->f_count = 0U;
+            for (di = 0; di < n; di++) {
+                cJSON *d = cJSON_GetArrayItem(daily, di);
+                cJSON *dh = cJSON_GetObjectItem(d, "high");
+                cJSON *dl = cJSON_GetObjectItem(d, "low");
+                if (dh == NULL || dl == NULL ||
+                    cJSON_GetStringValue(dh) == NULL ||
+                    cJSON_GetStringValue(dl) == NULL) {
+                    continue;
+                }
+                out->f_high[di] = atoi(dh->valuestring);
+                out->f_low[di]  = atoi(dl->valuestring);
+                out->f_count++;
+            }
+        }
         cJSON *d0 = cJSON_GetArrayItem(daily, 0);
         cJSON *high = cJSON_GetObjectItem(d0, "high");
         cJSON *low = cJSON_GetObjectItem(d0, "low");

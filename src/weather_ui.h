@@ -46,7 +46,11 @@
  *      rendering the data instead of blanking into the FETCHING page;
  *   6) ui_main_view_t keeps the RA-only fields (time_str/ssid/low_str/
  *      high_str/provisioning) filled by weather_task; ssid now also feeds
- *      the provisioning/connecting/failed pages.
+ *      the provisioning/connecting/failed pages;
+ *   7) page cycle (2026-10-17): key click/double cycles 3 pages --
+ *      0 main weather, 1 WiFi info, 2 forecast (today + next days hi/lo);
+ *   8) provisioning page row2 shows the fixed SoftAP name "AP:leeWethWifi"
+ *      (the hotspot the phone must join), not the saved home SSID.
  *
  * wifi_status_t comes from wifi_status.h (platform-neutral), matching GD32's
  * wifi_prov.h values 1:1 (§8.1 UI/state consistency rule).
@@ -95,9 +99,17 @@ typedef struct {
     uint8_t     page;       /* page index (extension) */
 } ui_wifi_view_t;
 
+/* Forecast page view data (3-day hi/lo, seniverse daily.json).
+ * row_str[i]: "low/high" ASCII; "--" = this day has no data. */
+typedef struct {
+    char    row_str[3][12];  /* index 0=today, 1=tomorrow, 2=day-after */
+    uint8_t count;           /* days with data, <=3 */
+} ui_forecast_view_t;
+
 void ui_init(void);
 void ui_main_page(const ui_main_view_t *v, wifi_status_t st);
 void ui_wifi_page(const ui_wifi_view_t *v, wifi_status_t st);
+void ui_forecast_page(const ui_forecast_view_t *v);
 void ui_boot_splash(void);
 
 #endif /* _WEATHER_UI_H_ */
