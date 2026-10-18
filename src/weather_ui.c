@@ -183,9 +183,10 @@ void ui_init(void)
 
 void ui_forecast_page(const ui_forecast_view_t *v)
 {
-    /* 2026-10-17 redesign (3rd round, user layout):
+    /* 2026-10-17 redesign (3rd round, user layout; 4th tweak adds colons
+     * between the CN labels and the digits: ming:/hou:):
      * row0 (16px): current weather glyphs + current temperature + time,
-     * rows 2-3 (16px): tomorrow/day-after lo/hi with small degree signs. */
+     * rows 2-3 (16px): "ming:lo/hi  hou:lo/hi" with small degree signs. */
     const char *time_s = v->time_str[0] ? v->time_str : "--:--";
     const char *temp_s = v->temp_str[0] ? v->temp_str : "--";
     const char *tom    = v->row_str[1][0] ? v->row_str[1] : "--";
@@ -213,26 +214,29 @@ void ui_forecast_page(const ui_forecast_view_t *v)
     printf("[oled] f0 code=%d temp=%s time=%s\r\n",
            (int)v->wcode, temp_s, time_s);
 
-    /* rows 2-3: tomorrow lo/hi, then day-after lo/hi, 16px. */
+    /* rows 2-3: "ming:lo/hi", then "hou:lo/hi", 16px with colon separators. */
     oled_cn_show(0, 2, WX_CN_MING_F);
-    OLED_ShowString(18, 2, (u8 *)tom, 16);
-    x = (u8)(18U + strlen(tom) * 8U);
+    OLED_ShowString(16, 2, (u8 *)":", 16);
+    OLED_ShowString(24, 2, (u8 *)tom, 16);
+    x = (u8)(24U + strlen(tom) * 8U);
     if (x <= 118U) {
         OLED_DrawBMP(x, 3, 8, 8, (u8 *)BMP_DEGREE);
     }
-    x = (u8)(18U + strlen(tom) * 8U + 12U);
-    /* draw the day-after pair only if glyph + value + degree all fit; a
-     * "low/high" of 6+ chars each would overflow 128px -- then skip. */
-    if ((u16)x + 18U + strlen(dat) * 8U + 8U <= 128U) {
+    x = (u8)(x + 8U);
+    /* draw the day-after pair only if glyph + colon + value + degree all
+     * fit; otherwise skip (a "low/high" of 6+ chars would overflow). */
+    if ((u16)x + 16U + 8U + strlen(dat) * 8U + 8U <= 128U) {
         oled_cn_show(x, 2, WX_CN_HOU_F);
-        x = (u8)(x + 18U);
+        x = (u8)(x + 16U);
+        OLED_ShowString(x, 2, (u8 *)":", 16);
+        x = (u8)(x + 8U);
         OLED_ShowString(x, 2, (u8 *)dat, 16);
         x = (u8)(x + strlen(dat) * 8U);
         if (x <= 118U) {
             OLED_DrawBMP(x, 3, 8, 8, (u8 *)BMP_DEGREE);
         }
     }
-    printf("[oled] L2-3=ming %s hou %s\r\n", tom, dat);
+    printf("[oled] L2-3=ming:%s hou:%s\r\n", tom, dat);
 }
 
 void ui_boot_splash(void)
@@ -380,11 +384,11 @@ void ui_main_page(const ui_main_view_t *v, wifi_status_t st)
         OLED_DrawBMP(degree_x, 0, 8, 8, (u8 *)BMP_DEGREE);
     }
 
-    /* Bottom big row (16px, spans pages 2-3): "wind speed xx  humidity xx".
-     * No units, no TODAY row (removed per review: it duplicated the temps).
-     * 16px layout can hold exactly two pairs (2*48px + spaces <= 128px);
-     * adding a third pair (today) would not fit -- today gets shown via the
-     * top row temperature instead. */
+    /* Bottom big row (16px, spans pages 2-3): "speed-label:value  hum-label:value"
+     * -- colon separators between the CN labels and the digits (user request
+     * 2026-10-17). No units, no TODAY row (removed per review: it duplicated the
+     * temps). If the final value is too long to fit (e.g. 3-digit wind), it is
+     * skipped instead of wrapping into the next page. */
     {
         u8 x = 0;
         const char *wind = v->wind_str[0] ? v->wind_str : "--";
@@ -392,12 +396,16 @@ void ui_main_page(const ui_main_view_t *v, wifi_status_t st)
 
         oled_cn_show(x, 2, WX_CN_FENG); x = (u8)(x + 16U);
         oled_cn_show(x, 2, WX_CN_SU);   x = (u8)(x + 16U);
+        OLED_ShowString(x, 2, (u8 *)":", 16);    x = (u8)(x + 8U);
         OLED_ShowString(x, 2, (u8 *)wind, 16);
         x = (u8)(x + strlen(wind) * 8U);
-        OLED_ShowString(x, 2, (u8 *)" ", 16); x = (u8)(x + 8U);
+        OLED_ShowString(x, 2, (u8 *)" ", 16);    x = (u8)(x + 8U);
         oled_cn_show(x, 2, WX_CN_SHI_D); x = (u8)(x + 16U);
         oled_cn_show(x, 2, WX_CN_DU_D);  x = (u8)(x + 16U);
-        OLED_ShowString(x, 2, (u8 *)hum, 16);
+        OLED_ShowString(x, 2, (u8 *)":", 16);    x = (u8)(x + 8U);
+        if ((u16)x + strlen(hum) * 8U <= 128U) {
+            OLED_ShowString(x, 2, (u8 *)hum, 16);
+        }
     }
 
     printf("[oled] L0=city:%s %sC icon=%u\r\n",
